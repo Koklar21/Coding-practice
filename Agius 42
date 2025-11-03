@@ -145,12 +145,41 @@ class SecurityNode:
         else:
             self.watchtower_scan(level="Passive_Scan")
 
-    # --- WATCHTOWER SYSTEM ---
+    # --- WATCHTOWER SYSTEM (Includes Self-Repair Protocol) ---
     
+    def _execute_self_repair(self, repair_target: str, repair_action: str) -> None:
+        """
+        Executes a targeted self-repair action on a critical system component.
+        This simulates patching or automatic remediation (e.g., restoring minimum defense layers).
+        """
+        self._log_event(f"Initiating self-repair sequence. Target: {repair_target}. Action: {repair_action}", module="SELF_REPAIR")
+
+        if repair_target == "FIREWALL_UNDERDEPLOYED":
+            # Auto-deploy until layer 5 is reached, or MAX_FIREWALL_LAYERS if less than 5 layers are left.
+            layers_to_deploy = max(5, self.firewall_layer + 1) - self.firewall_layer
+            for _ in range(layers_to_deploy):
+                if self.firewall_layer < self.MAX_FIREWALL_LAYERS:
+                    self.advance_firewall()
+            self._log_event(f"Firewall auto-deployed {layers_to_deploy} layers to reach minimum operational level.", module="SELF_REPAIR")
+        
+        # Example of integrity check restoration
+        elif repair_target == "SYSTEM_INTEGRITY":
+            # For demonstration, ensure Watchtower is 'Monitoring' status if it wasn't.
+            if self.system_status.get("Watchtower") != "Monitoring":
+                 self._update_system_status("Watchtower", "Monitoring")
+            self._log_event("System integrity restored. Core services checked and validated.", module="SELF_REPAIR")
+
+
     def watchtower_scan(self, level: str = "Standard_Scan") -> None:
         """The Watchtower system performs continuous monitoring and self-correction."""
         self._update_system_status("Watchtower", f"Scanning ({level})...")
-        
+
+        # SELF-REPAIR TRIGGER: Check 1: Firewall Integrity
+        # If not in Normal mode (i.e., Elevated or Lockdown) and firewall is below Layer 5, repair immediately.
+        if self.firewall_layer < 5 and self.security_mode != "Normal":
+            self._log_event("INTEGRITY VIOLATION: Firewall under-deployed for current security mode. Initiating repair.", module="WATCHTOWER")
+            self._execute_self_repair("FIREWALL_UNDERDEPLOYED", "Auto-deploy layers to minimum Layer 5.")
+            
         # If PsyOp is active, inject cognitive stress logs during the scan
         if self.deception_active:
              self._inject_cognitive_stress(random.randint(5, 15))
@@ -286,6 +315,7 @@ if __name__ == "__main__":
     node = SecurityNode()
     
     # Initial defense deployment
+    # Deploy only 3 layers so the self-repair trigger will fail the check later
     for _ in range(3):
         node.advance_firewall()
     
@@ -293,14 +323,18 @@ if __name__ == "__main__":
     print("\n--- STAGE 1: HIGH-LEVEL THREAT & PSYOP DEPLOYMENT ---")
     node.log_threat("203.0.113.15", "Stealthy credential stuffing against exposed API.", "High")
     
-    # 2. Adversary spends time analyzing stress and paradox
-    print("\n--- STAGE 2: WATCHTOWER INJECTS STRESS AND PARADOXICAL LURES ---")
+    # The system is now in "Elevated" mode but only at Layer 3. The Watchtower should trigger self-repair.
+    print(f"\n[Pre-Scan Check] Firewall Layer: {node.firewall_layer}, Mode: {node.security_mode}")
     
-    # Run three scans to simulate the adversary repeatedly checking logs and getting more confused
-    for i in range(3):
+    # 2. Watchtower runs, detects low firewall layer, and triggers self-repair to Layer 5.
+    print("\n--- STAGE 2: WATCHTOWER RUNS & EXECUTES SELF-REPAIR (Auto-deploy to L5) ---")
+    node.watchtower_scan()
+    
+    # Run two more scans to inject stress/paradox
+    for i in range(2):
         time.sleep(0.01) 
         node.watchtower_scan()
-        if i == 1:
+        if i == 0:
              # Manually log a "successful" payload delivery to a replaced component
              node._log_threat(
                  source="Adversary_Action",
