@@ -1,0 +1,337 @@
+import datetime
+import logging
+import time
+import random
+from typing import Any, Dict, List, Tuple, Optional
+
+# --- Initialization and Configuration ---
+# Setting up standard military-grade logging configuration.
+# Format: Timestamp (ISO) | Severity Level | Module | Message
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(module)-10s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+SYSTEM_ID = "AEGIS-42-NODE-01"
+
+# --- Custom Exceptions for Operational Failures ---
+class SecurityNodeError(Exception):
+    """Base exception for all security node operational failures."""
+    pass
+
+class OperationalConstraintError(SecurityNodeError):
+    """Raised when an operation violates system constraints (e.g., max layers)."""
+    pass
+
+# --- Core Security Node Class ---
+class SecurityNode:
+    """
+    The Aegis-42 Multilayered Defensive Scaffolding.
+
+    Features deep Psychosomatic Warfare via the Theseus Protocol, Watchtower 
+    monitoring, and a Cognitive Stress Engine.
+    """
+    
+    # Static Constraints (The Operational Mandate)
+    VALID_SEVERITIES: set[str] = {"Low", "Medium", "High", "Critical", "PsyOp"}
+    MAX_FIREWALL_LAYERS: int = 42
+
+    def __init__(self):
+        """Initializes all system components, logs, and status registries."""
+        
+        # --- Data Logging and Persistence ---
+        self.event_log: List[Tuple[datetime.datetime, str]] = [] 
+        self.threat_log: List[Dict[str, Any]] = []               
+        self.system_status: Dict[str, str] = {}                  
+        
+        # --- Defensive State Parameters ---
+        self.firewall_layer: int = 0
+        self.security_mode: str = "Normal"                       
+        self.deception_active: bool = False                      
+        
+        # --- PSYOP: Theseus Protocol Manager State & Cognitive Load ---
+        self.theseus_state: Dict[str, bool] = { 
+            "Core_Data_Locus": False,        # Decoy/Paradoxical State
+            "Auth_Service_ID": False,
+            "Firewall_Signature_Morph": False
+        }
+        self.cognitive_load_index: int = 0  # Tracks the level of data flood/contradiction
+
+        # Initial operational status update
+        self._log_event(f"[{SYSTEM_ID}] Operational Startup Sequence Initiated.")
+        self._update_system_status("Firewall", f"Inactive (Layer {self.firewall_layer}/{self.MAX_FIREWALL_LAYERS})")
+        self._update_system_status("PsyOp_Module", "Dormant (Theseus Protocol Offline)")
+        self._update_system_status("Watchtower", "Standby")
+
+    # --- PRIVATE LOGGING METHODS (Active Data Logging) ---
+
+    def _log_event(self, message: str, module: str = "SYSTEM"):
+        """Logs a general system event."""
+        timestamp = datetime.datetime.utcnow()
+        self.event_log.append((timestamp, message))
+        logging.info(f"[{module}] {message}")
+
+    def _log_threat(self, source: str, description: str, severity: str, module: str = "THREAT_INT"):
+        """Logs a specific, parsed threat event."""
+        if severity not in self.VALID_SEVERITIES:
+            raise SecurityNodeError(f"Invalid severity level: {severity}")
+            
+        entry = {
+            "timestamp": datetime.datetime.utcnow(),
+            "source": source,
+            "description": description,
+            "severity": severity,
+            "module": module
+        }
+        self.threat_log.append(entry)
+        
+        if severity == "PsyOp":
+            # PsyOp logs are designed to be confusing and contradictory
+            logging.debug(f"[{module}] DECEPTION LOG: {source} | {description}")
+        elif severity in {"High", "Critical"}:
+            logging.critical(f"[{module}] ALERT! {source} | {severity} | {description}")
+        else:
+            logging.warning(f"[{module}] {source} | {severity} | {description}")
+
+    def _update_system_status(self, component: str, status: str):
+        """Updates the status register for a critical system component."""
+        old_status = self.system_status.get(component, "Unknown")
+        self.system_status[component] = status
+        self._log_event(f"{component} status changed from '{old_status}' to '{status}'", module="STATUS_REG")
+
+    # --- CORE DEFENSIVE OPERATIONS ---
+
+    def advance_firewall(self) -> None:
+        """Engages the next defensive layer."""
+        if self.firewall_layer >= self.MAX_FIREWALL_LAYERS:
+            raise OperationalConstraintError("Firewall is at maximum Layer 42. Deployment complete.")
+            
+        self.firewall_layer += 1
+        difficulty_metric = round((self.firewall_layer ** 1.5) * 0.42, 2) 
+        
+        status_msg = (
+            f"Active (Layer {self.firewall_layer}/{self.MAX_FIREWALL_LAYERS}, "
+            f"C² Metric: {difficulty_metric})"
+        )
+        self._update_system_status("Firewall", status_msg)
+        self._log_event(f"Layer {self.firewall_layer} deployed. C² Rating: {difficulty_metric}", module="FIREWALL")
+
+    def switch_security_mode(self, mode: str) -> None:
+        """Changes the overall operational stance of the node."""
+        valid_modes = {"Normal", "Elevated", "Lockdown"}
+        if mode not in valid_modes:
+            raise SecurityNodeError(f"Invalid operational mode: {mode}")
+            
+        old_mode = self.security_mode
+        if old_mode == mode: return
+
+        self.security_mode = mode
+        self._log_event(f"Operational Stance escalated: '{old_mode}' -> '{mode}'", module="MODE_CHANGE")
+        
+        # When entering Lockdown, eliminate all deception to stabilize forensics
+        if mode == "Lockdown":
+             self.disable_psyop_defense(reason="Lockdown: Forensics Integrity Assurance")
+
+    def log_threat(self, source: str, description: str, severity: str):
+        """External interface for logging a threat and triggering adaptive responses."""
+        self._log_threat(source, description, severity)
+        
+        if severity == "Critical":
+            self.switch_security_mode("Lockdown")
+            self.watchtower_scan(level="Full_Response")
+        elif severity == "High" and not self.deception_active:
+            self.switch_security_mode("Elevated")
+            self.deploy_psyop_defense(f"Active probe detected from {source}")
+        else:
+            self.watchtower_scan(level="Passive_Scan")
+
+    # --- WATCHTOWER SYSTEM ---
+    
+    def watchtower_scan(self, level: str = "Standard_Scan") -> None:
+        """The Watchtower system performs continuous monitoring and self-correction."""
+        self._update_system_status("Watchtower", f"Scanning ({level})...")
+        
+        # If PsyOp is active, inject cognitive stress logs during the scan
+        if self.deception_active:
+             self._inject_cognitive_stress(random.randint(5, 15))
+            
+        self._update_system_status("Watchtower", f"Complete ({level}). Mode: {self.security_mode}")
+
+    # --- PSYCHOSOMATIC WARFARE MODULE (Theseus Protocol & Cognitive Stress) ---
+
+    def deploy_psyop_defense(self, trigger_message: str):
+        """
+        Activates the Theseus Protocol and the Cognitive Stress Engine.
+        """
+        if self.deception_active:
+            self._log_event("PsyOp module already active. Initiating identity morph cycle and stress refresh.", module="PSYOP_MGR")
+            self._morph_theseus_state() 
+            self._inject_cognitive_stress(20) # Inject more stress on refresh
+            return
+            
+        self.deception_active = True
+        self.cognitive_load_index = 50 # Set initial cognitive load
+        self._morph_theseus_state(initial=True) 
+        self._update_system_status("PsyOp_Module", "ACTIVE - Theseus Protocol Engaged")
+        
+        # Inject the first paradoxical confirmation lure
+        decoy_ip = f"172.16.{random.randint(1, 254)}.{random.randint(1, 254)}"
+        self._log_threat(
+            source="Paradox_Lure", 
+            description=(
+                f"SUCCESSFUL INFILTRATION: Adversary gained read access to Decoy Locus {decoy_ip}. "
+                f"Begin extraction (Status: 0% complete). Trigger: {trigger_message}"
+            ), 
+            severity="PsyOp",
+            module="PSYOP_LURE"
+        )
+        self._log_event("Paradoxical Confirmation lure deployed. Adversary confidence boosted (falsely).", module="PSYOP_MGR")
+
+    def _morph_theseus_state(self, initial: bool = False):
+        """Randomly changes the identity state of core components."""
+        
+        for component in self.theseus_state.keys():
+            # Flip the state (replace or revert replacement)
+            if random.random() > 0.4 or initial:
+                self.theseus_state[component] = not self.theseus_state[component]
+                action = "REPLACED (Decoy)" if self.theseus_state[component] else "REVERTED (Original)"
+                
+                self._log_event(
+                    f"THESEUS MORPH: {component} component {action}.", 
+                    module="PSYOP_MORPH"
+                )
+                
+                # If a component is replaced, immediately log its contradictory status
+                if self.theseus_state[component]:
+                    self._log_threat(
+                        source="Status_Contradiction", 
+                        description=f"{component} reports successful read access to its OWN log data, but system reports 'Not Found'.", 
+                        severity="PsyOp",
+                        module="PSYOP_MORPH"
+                    )
+
+    def _inject_cognitive_stress(self, magnitude: int):
+        """Simulates flooding system logs with realistic, contradictory, and useless data."""
+        self.cognitive_load_index = min(100, self.cognitive_load_index + magnitude)
+        
+        for i in range(magnitude):
+            decoy_service = random.choice(["RPC_Server_1", "DB_Mirror_4", "Telemetry_Sink_A"])
+            decoy_ip = f"10.0.0.{random.randint(1, 254)}"
+            
+            # These logs sound critical but are utterly irrelevant/contradictory
+            stress_message = random.choice([
+                f"[{decoy_service}] Fatal error accessing non-existent file path: /usr/local/temp/0x{random.getrandbits(12):x}.log",
+                f"[{decoy_ip}] TCP Handshake successful, but data checksum failed validation on port {random.randint(40000, 60000)}.",
+                f"Internal watchdog detected 5s heartbeat delay on system {random.choice(['A', 'B', 'C'])}, auto-corrected immediately.",
+                f"Authentication attempt successful (User: ghost_{random.randint(100, 999)}), but source IP is unlogged.",
+            ])
+            
+            self._log_threat("Cognitive_Load", stress_message, "Low", module="STRESS_ENGINE")
+
+        self._update_system_status("Cognitive_Stress_Index", f"{self.cognitive_load_index}%")
+        self._log_event(f"Injected {magnitude} data points. Stress Index now {self.cognitive_load_index}%.", module="STRESS_ENGINE")
+
+
+    def disable_psyop_defense(self, reason: str):
+        """Deactivates the defensive deception module and restores core identities."""
+        if not self.deception_active:
+            self._log_event("PsyOp module already dormant. No action taken.", module="PSYOP_MGR")
+            return
+        
+        self.deception_active = False
+        self.cognitive_load_index = 0
+        
+        # Explicitly restore all core components to their original state
+        for component in self.theseus_state:
+            self.theseus_state[component] = False
+            
+        self._update_system_status("PsyOp_Module", "Dormant (Theseus Protocol Offline)")
+        self._update_system_status("Cognitive_Stress_Index", "0% (Stabilized)")
+        self._log_event(f"PsyOp Module deactivated and identities stabilized. Reason: {reason}", module="PSYOP_MGR")
+
+    # --- REPORTING AND TELEMETRY (External Interface) ---
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Provides a high-level, concise summary of the node's current state."""
+        return {
+            "System_ID": SYSTEM_ID,
+            "Total_Events": len(self.event_log),
+            "Total_Threats": len(self.threat_log),
+            "Firewall_Layer": f"{self.firewall_layer}/{self.MAX_FIREWALL_LAYERS}",
+            "Security_Mode": self.security_mode,
+            "PsyOp_Active": self.deception_active,
+            "Cognitive_Load_Index": f"{self.cognitive_load_index}%",
+            "Theseus_State": self.theseus_state,
+            "Status_Components": list(self.system_status.keys())
+        }
+
+    def get_logs(self) -> Dict[str, Any]:
+        """Dumps all current logs for deep forensic analysis."""
+        return {
+            "Event_Log": [
+                (ts.isoformat(), msg) 
+                for ts, msg in self.event_log
+            ],
+            "Threat_Log": [
+                {**entry, "timestamp": entry["timestamp"].isoformat()} 
+                for entry in self.threat_log
+            ],
+            "System_Status_Register": self.system_status.copy()
+        }
+
+# --- Execution Simulation ---
+if __name__ == "__main__":
+    
+    print("\n--- AEGIS-42: SCENARIO INITIATION (Deep PsyOp Test) ---\n")
+    node = SecurityNode()
+    
+    # Initial defense deployment
+    for _ in range(3):
+        node.advance_firewall()
+    
+    # 1. High-level threat triggers the full PsyOp defense
+    print("\n--- STAGE 1: HIGH-LEVEL THREAT & PSYOP DEPLOYMENT ---")
+    node.log_threat("203.0.113.15", "Stealthy credential stuffing against exposed API.", "High")
+    
+    # 2. Adversary spends time analyzing stress and paradox
+    print("\n--- STAGE 2: WATCHTOWER INJECTS STRESS AND PARADOXICAL LURES ---")
+    
+    # Run three scans to simulate the adversary repeatedly checking logs and getting more confused
+    for i in range(3):
+        time.sleep(0.01) 
+        node.watchtower_scan()
+        if i == 1:
+             # Manually log a "successful" payload delivery to a replaced component
+             node._log_threat(
+                 source="Adversary_Action",
+                 description="Malware signature successfully deployed to FireWall_Signature_Morph Locus. Reporting 100% success.",
+                 severity="High",
+                 module="ADVERSARY_SIM"
+             )
+             # Then, immediately log the contradictory system response
+             node._log_threat(
+                 source="System_Integrity_Check",
+                 description="FireWall_Signature_Morph integrity check passed. No anomalies detected. Reporting 0% change.",
+                 severity="PsyOp",
+                 module="PSYOP_COUNTER"
+             )
+    
+    # 3. Critical Threat Simulation (Triggers Lockdown and Disables PsyOp)
+    print("\n--- STAGE 3: CRITICAL THREAT & LOCKDOWN (Stabilization) ---")
+    node.log_threat("198.51.100.33", "Brute-force attempt on core vault access key identified.", "Critical")
+
+    print("\n--- FINAL TELEMETRY REPORT ---\n")
+    import json
+    
+    summary = node.get_summary()
+    print("SUMMARY:")
+    print(json.dumps(summary, indent=4))
+    
+    # Display the Psychosomatic log entries (PsyOp and relevant Low/High)
+    print("\n--- FORENSIC LOG EXCERPT (PsyOp/Paradox) ---")
+    psyop_logs = [t for t in node.get_logs()["Threat_Log"] if t["severity"] in ["PsyOp", "Low", "High"]]
+    for log in psyop_logs[-15:]: # Show last 15 relevant entries for analysis
+        print(f"[{log['timestamp'][:19]}] [{log['module']}] ({log['severity']}) -> {log['description']}")
+        
+    print(f"\nFinal Cognitive Load Index: {summary['Cognitive_Load_Index']} (Should be 0% after Lockdown)")
+    print("\n--- SCENARIO END ---")
