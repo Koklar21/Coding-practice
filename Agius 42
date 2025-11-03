@@ -1,141 +1,161 @@
+from __future__ import annotations
+
 import datetime
 import logging
 import time
 import random
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple
 
-# --- Initialization and Configuration ---
-# Setting up standard military-grade logging configuration.
-# Format: Timestamp (ISO) | Severity Level | Module | Message
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)-8s | %(module)-10s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 SYSTEM_ID = "AEGIS-42-NODE-01"
 
-# --- Custom Exceptions for Operational Failures ---
+# --- Logging (structured, ISO timestamps) ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(module)-10s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+
 class SecurityNodeError(Exception):
     """Base exception for all security node operational failures."""
-    pass
+
 
 class OperationalConstraintError(SecurityNodeError):
     """Raised when an operation violates system constraints (e.g., max layers)."""
-    pass
 
-# --- Core Security Node Class ---
+
 class SecurityNode:
     """
-    The Aegis-42 Multilayered Defensive Scaffolding.
+    The Aegis-42 Multilayer Defensive Scaffolding.
 
-    Features deep Psychosomatic Warfare via the Theseus Protocol, Watchtower 
-    monitoring, and a Cognitive Stress Engine.
+    Features:
+      - Watchtower scan hooks
+      - Self-repair trigger logic
+      - PsyOp (Theseus Protocol) with cognitive stress injection
+
+    Notes:
+      - This class focuses on orchestration and simulation. Plug real sensors
+        and watchtowers via your ingestion layer.
     """
-    
-    # Static Constraints (The Operational Mandate)
+
     VALID_SEVERITIES: set[str] = {"Low", "Medium", "High", "Critical", "PsyOp"}
     MAX_FIREWALL_LAYERS: int = 42
 
-    def __init__(self):
-        """Initializes all system components, logs, and status registries."""
-        
-        # --- Data Logging and Persistence ---
-        self.event_log: List[Tuple[datetime.datetime, str]] = [] 
-        self.threat_log: List[Dict[str, Any]] = []               
-        self.system_status: Dict[str, str] = {}                  
-        
-        # --- Defensive State Parameters ---
-        self.firewall_layer: int = 0
-        self.security_mode: str = "Normal"                       
-        self.deception_active: bool = False                      
-        
-        # --- PSYOP: Theseus Protocol Manager State & Cognitive Load ---
-        self.theseus_state: Dict[str, bool] = { 
-            "Core_Data_Locus": False,        # Decoy/Paradoxical State
-            "Auth_Service_ID": False,
-            "Firewall_Signature_Morph": False
-        }
-        self.cognitive_load_index: int = 0  # Tracks the level of data flood/contradiction
+    def __init__(self) -> None:
+        # Persistent logs
+        self.event_log: List[Tuple[datetime.datetime, str]] = []
+        self.threat_log: List[Dict[str, Any]] = []
+        self.system_status: Dict[str, str] = {}
 
-        # Initial operational status update
+        # Defensive state
+        self.firewall_layer: int = 0
+        self.security_mode: str = "Normal"
+        self.deception_active: bool = False
+
+        # Theseus Protocol state
+        self.theseus_state: Dict[str, bool] = {
+            "Core_Data_Locus": False,
+            "Auth_Service_ID": False,
+            "Firewall_Signature_Morph": False,
+        }
+        self.cognitive_load_index: int = 0
+
+        # Bootstrap status
         self._log_event(f"[{SYSTEM_ID}] Operational Startup Sequence Initiated.")
-        self._update_system_status("Firewall", f"Inactive (Layer {self.firewall_layer}/{self.MAX_FIREWALL_LAYERS})")
+        self._update_system_status(
+            "Firewall", f"Inactive (Layer {self.firewall_layer}/{self.MAX_FIREWALL_LAYERS})"
+        )
         self._update_system_status("PsyOp_Module", "Dormant (Theseus Protocol Offline)")
         self._update_system_status("Watchtower", "Standby")
 
-    # --- PRIVATE LOGGING METHODS (Active Data Logging) ---
+    # ----------------- Logging helpers -----------------
 
-    def _log_event(self, message: str, module: str = "SYSTEM"):
-        """Logs a general system event."""
-        timestamp = datetime.datetime.utcnow()
-        self.event_log.append((timestamp, message))
+    def _log_event(self, message: str, module: str = "SYSTEM") -> None:
+        ts = datetime.datetime.utcnow()
+        self.event_log.append((ts, message))
         logging.info(f"[{module}] {message}")
 
-    def _log_threat(self, source: str, description: str, severity: str, module: str = "THREAT_INT"):
-        """Logs a specific, parsed threat event."""
+    def _log_threat(
+        self, source: str, description: str, severity: str, module: str = "THREAT_INT"
+    ) -> None:
         if severity not in self.VALID_SEVERITIES:
             raise SecurityNodeError(f"Invalid severity level: {severity}")
-            
+
         entry = {
             "timestamp": datetime.datetime.utcnow(),
             "source": source,
             "description": description,
             "severity": severity,
-            "module": module
+            "module": module,
         }
         self.threat_log.append(entry)
-        
+
         if severity == "PsyOp":
-            # PsyOp logs are designed to be confusing and contradictory
             logging.debug(f"[{module}] DECEPTION LOG: {source} | {description}")
         elif severity in {"High", "Critical"}:
             logging.critical(f"[{module}] ALERT! {source} | {severity} | {description}")
         else:
             logging.warning(f"[{module}] {source} | {severity} | {description}")
 
-    def _update_system_status(self, component: str, status: str):
-        """Updates the status register for a critical system component."""
-        old_status = self.system_status.get(component, "Unknown")
+    def _update_system_status(self, component: str, status: str) -> None:
+        old = self.system_status.get(component, "Unknown")
         self.system_status[component] = status
-        self._log_event(f"{component} status changed from '{old_status}' to '{status}'", module="STATUS_REG")
+        self._log_event(
+            f"{component} status changed from '{old}' to '{status}'", module="STATUS_REG"
+        )
 
-    # --- CORE DEFENSIVE OPERATIONS ---
+    # ----------------- Core defensive ops -----------------
 
     def advance_firewall(self) -> None:
-        """Engages the next defensive layer."""
+        """Engage one additional defensive layer."""
         if self.firewall_layer >= self.MAX_FIREWALL_LAYERS:
-            raise OperationalConstraintError("Firewall is at maximum Layer 42. Deployment complete.")
-            
+            raise OperationalConstraintError(
+                f"Firewall is at maximum Layer {self.MAX_FIREWALL_LAYERS}. Deployment complete."
+            )
+
         self.firewall_layer += 1
-        difficulty_metric = round((self.firewall_layer ** 1.5) * 0.42, 2) 
-        
-        status_msg = (
-            f"Active (Layer {self.firewall_layer}/{self.MAX_FIREWALL_LAYERS}, "
-            f"C² Metric: {difficulty_metric})"
+        c2 = round((self.firewall_layer ** 1.5) * 0.42, 2)
+        self._update_system_status(
+            "Firewall",
+            f"Active (Layer {self.firewall_layer}/{self.MAX_FIREWALL_LAYERS}, C² Metric: {c2})",
         )
-        self._update_system_status("Firewall", status_msg)
-        self._log_event(f"Layer {self.firewall_layer} deployed. C² Rating: {difficulty_metric}", module="FIREWALL")
+        self._log_event(f"Layer {self.firewall_layer} deployed. C² Rating: {c2}", module="FIREWALL")
+
+    def _ensure_min_firewall(self, minimum: int) -> int:
+        """
+        Ensure firewall has at least 'minimum' layers.
+        Returns number of layers deployed during the operation.
+        """
+        if minimum < 0:
+            minimum = 0
+        if minimum > self.MAX_FIREWALL_LAYERS:
+            minimum = self.MAX_FIREWALL_LAYERS
+
+        deployed = 0
+        while self.firewall_layer < minimum:
+            self.advance_firewall()
+            deployed += 1
+        return deployed
 
     def switch_security_mode(self, mode: str) -> None:
-        """Changes the overall operational stance of the node."""
-        valid_modes = {"Normal", "Elevated", "Lockdown"}
-        if mode not in valid_modes:
+        valid = {"Normal", "Elevated", "Lockdown"}
+        if mode not in valid:
             raise SecurityNodeError(f"Invalid operational mode: {mode}")
-            
-        old_mode = self.security_mode
-        if old_mode == mode: return
 
+        if mode == self.security_mode:
+            return
+
+        prev = self.security_mode
         self.security_mode = mode
-        self._log_event(f"Operational Stance escalated: '{old_mode}' -> '{mode}'", module="MODE_CHANGE")
-        
-        # When entering Lockdown, eliminate all deception to stabilize forensics
-        if mode == "Lockdown":
-             self.disable_psyop_defense(reason="Lockdown: Forensics Integrity Assurance")
+        self._log_event(f"Operational Stance escalated: '{prev}' -> '{mode}'", module="MODE_CHANGE")
 
-    def log_threat(self, source: str, description: str, severity: str):
-        """External interface for logging a threat and triggering adaptive responses."""
+        if mode == "Lockdown":
+            # Lockdown disables deception and stabilizes logging for forensics.
+            self.disable_psyop_defense("Lockdown: Forensics Integrity Assurance")
+
+    def log_threat(self, source: str, description: str, severity: str) -> None:
         self._log_threat(source, description, severity)
-        
+
         if severity == "Critical":
             self.switch_security_mode("Lockdown")
             self.watchtower_scan(level="Full_Response")
@@ -145,143 +165,133 @@ class SecurityNode:
         else:
             self.watchtower_scan(level="Passive_Scan")
 
-    # --- WATCHTOWER SYSTEM (Includes Self-Repair Protocol) ---
-    
-    def _execute_self_repair(self, repair_target: str, repair_action: str) -> None:
-        """
-        Executes a targeted self-repair action on a critical system component.
-        This simulates patching or automatic remediation (e.g., restoring minimum defense layers).
-        """
-        self._log_event(f"Initiating self-repair sequence. Target: {repair_target}. Action: {repair_action}", module="SELF_REPAIR")
+    # ----------------- Self-repair + watchtower orchestration -----------------
 
-        if repair_target == "FIREWALL_UNDERDEPLOYED":
-            # Auto-deploy until layer 5 is reached, or MAX_FIREWALL_LAYERS if less than 5 layers are left.
-            layers_to_deploy = max(5, self.firewall_layer + 1) - self.firewall_layer
-            for _ in range(layers_to_deploy):
-                if self.firewall_layer < self.MAX_FIREWALL_LAYERS:
-                    self.advance_firewall()
-            self._log_event(f"Firewall auto-deployed {layers_to_deploy} layers to reach minimum operational level.", module="SELF_REPAIR")
-        
-        # Example of integrity check restoration
-        elif repair_target == "SYSTEM_INTEGRITY":
-            # For demonstration, ensure Watchtower is 'Monitoring' status if it wasn't.
+    def _execute_self_repair(self, target: str, action: str) -> None:
+        self._log_event(
+            f"Initiating self-repair sequence. Target: {target}. Action: {action}", module="SELF_REPAIR"
+        )
+
+        if target == "FIREWALL_UNDERDEPLOYED":
+            deployed = self._ensure_min_firewall(5)
+            self._log_event(
+                f"Firewall auto-deployed {deployed} layer(s) to reach minimum operational level.",
+                module="SELF_REPAIR",
+            )
+
+        elif target == "SYSTEM_INTEGRITY":
             if self.system_status.get("Watchtower") != "Monitoring":
-                 self._update_system_status("Watchtower", "Monitoring")
-            self._log_event("System integrity restored. Core services checked and validated.", module="SELF_REPAIR")
-
+                self._update_system_status("Watchtower", "Monitoring")
+            self._log_event("System integrity restored. Core services validated.", module="SELF_REPAIR")
 
     def watchtower_scan(self, level: str = "Standard_Scan") -> None:
-        """The Watchtower system performs continuous monitoring and self-correction."""
         self._update_system_status("Watchtower", f"Scanning ({level})...")
 
-        # SELF-REPAIR TRIGGER: Check 1: Firewall Integrity
-        # If not in Normal mode (i.e., Elevated or Lockdown) and firewall is below Layer 5, repair immediately.
-        if self.firewall_layer < 5 and self.security_mode != "Normal":
-            self._log_event("INTEGRITY VIOLATION: Firewall under-deployed for current security mode. Initiating repair.", module="WATCHTOWER")
-            self._execute_self_repair("FIREWALL_UNDERDEPLOYED", "Auto-deploy layers to minimum Layer 5.")
-            
-        # If PsyOp is active, inject cognitive stress logs during the scan
+        # Trigger repair if mode is elevated/lockdown but firewall < L5
+        if self.security_mode != "Normal" and self.firewall_layer < 5:
+            self._log_event(
+                "INTEGRITY VIOLATION: Firewall under-deployed for current security mode. Initiating repair.",
+                module="WATCHTOWER",
+            )
+            self._execute_self_repair("FIREWALL_UNDERDEPLOYED", "Auto-deploy to Layer 5")
+
+        # PsyOp noise injection while deception is active
         if self.deception_active:
-             self._inject_cognitive_stress(random.randint(5, 15))
-            
+            self._inject_cognitive_stress(random.randint(5, 15))
+
         self._update_system_status("Watchtower", f"Complete ({level}). Mode: {self.security_mode}")
 
-    # --- PSYCHOSOMATIC WARFARE MODULE (Theseus Protocol & Cognitive Stress) ---
+    # ----------------- PsyOp / Theseus Protocol -----------------
 
-    def deploy_psyop_defense(self, trigger_message: str):
-        """
-        Activates the Theseus Protocol and the Cognitive Stress Engine.
-        """
+    def deploy_psyop_defense(self, trigger_message: str) -> None:
         if self.deception_active:
-            self._log_event("PsyOp module already active. Initiating identity morph cycle and stress refresh.", module="PSYOP_MGR")
-            self._morph_theseus_state() 
-            self._inject_cognitive_stress(20) # Inject more stress on refresh
+            self._log_event(
+                "PsyOp module already active. Cycling identity morph; refreshing stress.",
+                module="PSYOP_MGR",
+            )
+            self._morph_theseus_state()
+            self._inject_cognitive_stress(20)
             return
-            
+
         self.deception_active = True
-        self.cognitive_load_index = 50 # Set initial cognitive load
-        self._morph_theseus_state(initial=True) 
+        self.cognitive_load_index = 50
+        self._morph_theseus_state(initial=True)
         self._update_system_status("PsyOp_Module", "ACTIVE - Theseus Protocol Engaged")
-        
-        # Inject the first paradoxical confirmation lure
+
         decoy_ip = f"172.16.{random.randint(1, 254)}.{random.randint(1, 254)}"
         self._log_threat(
-            source="Paradox_Lure", 
+            source="Paradox_Lure",
             description=(
                 f"SUCCESSFUL INFILTRATION: Adversary gained read access to Decoy Locus {decoy_ip}. "
                 f"Begin extraction (Status: 0% complete). Trigger: {trigger_message}"
-            ), 
+            ),
             severity="PsyOp",
-            module="PSYOP_LURE"
+            module="PSYOP_LURE",
         )
-        self._log_event("Paradoxical Confirmation lure deployed. Adversary confidence boosted (falsely).", module="PSYOP_MGR")
+        self._log_event("Paradoxical confirmation lure deployed.", module="PSYOP_MGR")
 
-    def _morph_theseus_state(self, initial: bool = False):
-        """Randomly changes the identity state of core components."""
-        
-        for component in self.theseus_state.keys():
-            # Flip the state (replace or revert replacement)
-            if random.random() > 0.4 or initial:
-                self.theseus_state[component] = not self.theseus_state[component]
-                action = "REPLACED (Decoy)" if self.theseus_state[component] else "REVERTED (Original)"
-                
-                self._log_event(
-                    f"THESEUS MORPH: {component} component {action}.", 
-                    module="PSYOP_MORPH"
+    def _morph_theseus_state(self, initial: bool = False) -> None:
+        for component in list(self.theseus_state.keys()):
+            flip = initial or (random.random() > 0.4)
+            if not flip:
+                continue
+
+            self.theseus_state[component] = not self.theseus_state[component]
+            action = "REPLACED (Decoy)" if self.theseus_state[component] else "REVERTED (Original)"
+            self._log_event(f"THESEUS MORPH: {component} component {action}.", module="PSYOP_MORPH")
+
+            if self.theseus_state[component]:
+                self._log_threat(
+                    source="Status_Contradiction",
+                    description=(
+                        f"{component} reports successful read access to its OWN log data, "
+                        f"but system reports 'Not Found'."
+                    ),
+                    severity="PsyOp",
+                    module="PSYOP_MORPH",
                 )
-                
-                # If a component is replaced, immediately log its contradictory status
-                if self.theseus_state[component]:
-                    self._log_threat(
-                        source="Status_Contradiction", 
-                        description=f"{component} reports successful read access to its OWN log data, but system reports 'Not Found'.", 
-                        severity="PsyOp",
-                        module="PSYOP_MORPH"
-                    )
 
-    def _inject_cognitive_stress(self, magnitude: int):
-        """Simulates flooding system logs with realistic, contradictory, and useless data."""
+    def _inject_cognitive_stress(self, magnitude: int) -> None:
+        magnitude = max(0, magnitude)
         self.cognitive_load_index = min(100, self.cognitive_load_index + magnitude)
-        
-        for i in range(magnitude):
+
+        for _ in range(magnitude):
             decoy_service = random.choice(["RPC_Server_1", "DB_Mirror_4", "Telemetry_Sink_A"])
             decoy_ip = f"10.0.0.{random.randint(1, 254)}"
-            
-            # These logs sound critical but are utterly irrelevant/contradictory
-            stress_message = random.choice([
-                f"[{decoy_service}] Fatal error accessing non-existent file path: /usr/local/temp/0x{random.getrandbits(12):x}.log",
-                f"[{decoy_ip}] TCP Handshake successful, but data checksum failed validation on port {random.randint(40000, 60000)}.",
-                f"Internal watchdog detected 5s heartbeat delay on system {random.choice(['A', 'B', 'C'])}, auto-corrected immediately.",
-                f"Authentication attempt successful (User: ghost_{random.randint(100, 999)}), but source IP is unlogged.",
-            ])
-            
-            self._log_threat("Cognitive_Load", stress_message, "Low", module="STRESS_ENGINE")
+            msg = random.choice(
+                [
+                    f"[{decoy_service}] Fatal error accessing non-existent file path: "
+                    f"/usr/local/temp/0x{random.getrandbits(12):x}.log",
+                    f"[{decoy_ip}] TCP handshake successful, checksum failed on port {random.randint(40000, 60000)}.",
+                    f"Watchdog detected 5s heartbeat delay on system {random.choice(['A', 'B', 'C'])}, autocorrected.",
+                    f"Authentication attempt successful (User: ghost_{random.randint(100, 999)}), source IP unlogged.",
+                ]
+            )
+            self._log_threat("Cognitive_Load", msg, "Low", module="STRESS_ENGINE")
 
         self._update_system_status("Cognitive_Stress_Index", f"{self.cognitive_load_index}%")
-        self._log_event(f"Injected {magnitude} data points. Stress Index now {self.cognitive_load_index}%.", module="STRESS_ENGINE")
+        self._log_event(
+            f"Injected {magnitude} data points. Stress Index now {self.cognitive_load_index}%.",
+            module="STRESS_ENGINE",
+        )
 
-
-    def disable_psyop_defense(self, reason: str):
-        """Deactivates the defensive deception module and restores core identities."""
+    def disable_psyop_defense(self, reason: str) -> None:
         if not self.deception_active:
             self._log_event("PsyOp module already dormant. No action taken.", module="PSYOP_MGR")
             return
-        
+
         self.deception_active = False
         self.cognitive_load_index = 0
-        
-        # Explicitly restore all core components to their original state
         for component in self.theseus_state:
             self.theseus_state[component] = False
-            
+
         self._update_system_status("PsyOp_Module", "Dormant (Theseus Protocol Offline)")
         self._update_system_status("Cognitive_Stress_Index", "0% (Stabilized)")
         self._log_event(f"PsyOp Module deactivated and identities stabilized. Reason: {reason}", module="PSYOP_MGR")
 
-    # --- REPORTING AND TELEMETRY (External Interface) ---
+    # ----------------- Reporting -----------------
 
     def get_summary(self) -> Dict[str, Any]:
-        """Provides a high-level, concise summary of the node's current state."""
         return {
             "System_ID": SYSTEM_ID,
             "Total_Events": len(self.event_log),
@@ -290,496 +300,69 @@ class SecurityNode:
             "Security_Mode": self.security_mode,
             "PsyOp_Active": self.deception_active,
             "Cognitive_Load_Index": f"{self.cognitive_load_index}%",
-            "Theseus_State": self.theseus_state,
-            "Status_Components": list(self.system_status.keys())
+            "Theseus_State": dict(self.theseus_state),
+            "Status_Components": list(self.system_status.keys()),
         }
 
     def get_logs(self) -> Dict[str, Any]:
-        """Dumps all current logs for deep forensic analysis."""
         return {
-            "Event_Log": [
-                (ts.isoformat(), msg) 
-                for ts, msg in self.event_log
-            ],
-            "Threat_Log": [
-                {**entry, "timestamp": entry["timestamp"].isoformat()} 
-                for entry in self.threat_log
-            ],
-            "System_Status_Register": self.system_status.copy()
+            "Event_Log": [(ts.isoformat(), msg) for ts, msg in self.event_log],
+            "Threat_Log": [{**e, "timestamp": e["timestamp"].isoformat()} for e in self.threat_log],
+            "System_Status_Register": dict(self.system_status),
         }
 
-# --- Execution Simulation ---
+
 if __name__ == "__main__":
-    
+    # Scenario demo
     print("\n--- AEGIS-42: SCENARIO INITIATION (Deep PsyOp Test) ---\n")
     node = SecurityNode()
-    
-    # Initial defense deployment
-    # Deploy only 3 layers so the self-repair trigger will fail the check later
+
+    # Under-deploy to trigger self-repair later
     for _ in range(3):
         node.advance_firewall()
-    
-    # 1. High-level threat triggers the full PsyOp defense
+
     print("\n--- STAGE 1: HIGH-LEVEL THREAT & PSYOP DEPLOYMENT ---")
     node.log_threat("203.0.113.15", "Stealthy credential stuffing against exposed API.", "High")
-    
-    # The system is now in "Elevated" mode but only at Layer 3. The Watchtower should trigger self-repair.
+
     print(f"\n[Pre-Scan Check] Firewall Layer: {node.firewall_layer}, Mode: {node.security_mode}")
-    
-    # 2. Watchtower runs, detects low firewall layer, and triggers self-repair to Layer 5.
+
     print("\n--- STAGE 2: WATCHTOWER RUNS & EXECUTES SELF-REPAIR (Auto-deploy to L5) ---")
     node.watchtower_scan()
-    
-    # Run two more scans to inject stress/paradox
+
     for i in range(2):
-        time.sleep(0.01) 
+        time.sleep(0.01)
         node.watchtower_scan()
         if i == 0:
-             # Manually log a "successful" payload delivery to a replaced component
-             node._log_threat(
-                 source="Adversary_Action",
-                 description="Malware signature successfully deployed to FireWall_Signature_Morph Locus. Reporting 100% success.",
-                 severity="High",
-                 module="ADVERSARY_SIM"
-             )
-             # Then, immediately log the contradictory system response
-             node._log_threat(
-                 source="System_Integrity_Check",
-                 description="FireWall_Signature_Morph integrity check passed. No anomalies detected. Reporting 0% change.",
-                 severity="PsyOp",
-                 module="PSYOP_COUNTER"
-             )
-    
-    # 3. Critical Threat Simulation (Triggers Lockdown and Disables PsyOp)
+            node._log_threat(
+                source="Adversary_Action",
+                description=(
+                    "Malware signature successfully deployed to FireWall_Signature_Morph Locus. Reporting 100% success."
+                ),
+                severity="High",
+                module="ADVERSARY_SIM",
+            )
+            node._log_threat(
+                source="System_Integrity_Check",
+                description="FireWall_Signature_Morph integrity check passed. No anomalies detected. Reporting 0% change.",
+                severity="PsyOp",
+                module="PSYOP_COUNTER",
+            )
+
     print("\n--- STAGE 3: CRITICAL THREAT & LOCKDOWN (Stabilization) ---")
     node.log_threat("198.51.100.33", "Brute-force attempt on core vault access key identified.", "Critical")
 
-    print("\n--- FINAL TELEMETRY REPORT ---\n")
     import json
-    
+
+    print("\n--- FINAL TELEMETRY REPORT ---\n")
     summary = node.get_summary()
     print("SUMMARY:")
     print(json.dumps(summary, indent=4))
-    
-    # Display the Psychosomatic log entries (PsyOp and relevant Low/High)
+
     print("\n--- FORENSIC LOG EXCERPT (PsyOp/Paradox) ---")
-    psyop_logs = [t for t in node.get_logs()["Threat_Log"] if t["severity"] in ["PsyOp", "Low", "High"]]
-    for log in psyop_logs[-15:]: # Show last 15 relevant entries for analysis
+    psyop_logs = [
+        t for t in node.get_logs()["Threat_Log"] if t["severity"] in ["PsyOp", "Low", "High"]
+    ]
+    for log in psyop_logs[-15:]:
         print(f"[{log['timestamp'][:19]}] [{log['module']}] ({log['severity']}) -> {log['description']}")
-        
     print(f"\nFinal Cognitive Load Index: {summary['Cognitive_Load_Index']} (Should be 0% after Lockdown)")
-    print("\n--- SCENARIO END ---")# File: watchtower_watchers.py
-# Purpose: Watchtower framework for Project Aegis — six watchers + secure comms/audit plumbing
-# Requirements: pip install cryptography aiofiles
-# WARNING: Replace key storage with a KMS/HSM (AWS KMS, Azure Key Vault, Vault HSM, or hardware HSM)
-# Do not store private keys on disk in plaintext in production.
-
-from __future__ import annotations
-import os
-import json
-import time
-import asyncio
-import logging
-import hashlib
-import hmac
-import base64
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Callable
-from logging.handlers import RotatingFileHandler
-
-# cryptography libs
-from cryptography.hazmat.primitives import hashes, serialization, hmac as crypto_hmac
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives.asymmetric import utils as asym_utils
-from cryptography.hazmat.primitives import serialization as crypto_serialization
-
-# ---------------------------
-# Config + constants
-# ---------------------------
-AUDIT_LOG_PATH = os.environ.get("WATCHTOWER_AUDIT_LOG", "./watchtower_audit.log")
-ROTATE_BYTES = 10 * 1024 * 1024  # 10 MB log rotation
-KEY_SIZE_AES = 32  # 256-bit AES
-NONCE_SIZE = 12  # recommended for AES-GCM
-HMAC_KEY_SIZE = 32
-
-# ---------------------------
-# Logging / Audit ledger
-# ---------------------------
-logger = logging.getLogger("watchtower")
-logger.setLevel(logging.INFO)
-handler = RotatingFileHandler(AUDIT_LOG_PATH, maxBytes=ROTATE_BYTES, backupCount=7)
-formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-
-def secure_audit_append(entry: Dict[str, Any], hmac_key: bytes) -> None:
-    """
-    Append an audit entry in JSON with an HMAC for later verification.
-    Write to rotating logfile (as configured).
-    """
-    payload = json.dumps(entry, separators=(',', ':'), sort_keys=True)
-    h = hmac.new(hmac_key, payload.encode("utf-8"), hashlib.sha256).digest()
-    b64_sig = base64.b64encode(h).decode("utf-8")
-    logger.info(f"AUDIT {payload} HMAC={b64_sig}")
-
-
-# ---------------------------
-# Crypto utilities
-# ---------------------------
-@dataclass
-class CryptoBundle:
-    aes_key: bytes
-    hmac_key: bytes
-    rsa_private_pem: Optional[bytes] = None
-    rsa_public_pem: Optional[bytes] = None
-
-    @classmethod
-    def generate(cls, rsa_bits: int = 4096) -> "CryptoBundle":
-        aes_key = os.urandom(KEY_SIZE_AES)
-        hmac_key = os.urandom(HMAC_KEY_SIZE)
-        # Generate ephemeral RSA keypair (in prod, use KMS/HSM)
-        private_key = rsa.generate_private_key(public_exponent=65537, key_size=rsa_bits)
-        priv_pem = private_key.private_bytes(
-            encoding=crypto_serialization.Encoding.PEM,
-            format=crypto_serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=crypto_serialization.NoEncryption(),
-        )
-        pub_pem = private_key.public_key().public_bytes(
-            encoding=crypto_serialization.Encoding.PEM,
-            format=crypto_serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        return cls(aes_key=aes_key, hmac_key=hmac_key, rsa_private_pem=priv_pem, rsa_public_pem=pub_pem)
-
-    def encrypt(self, plaintext: bytes, associated_data: Optional[bytes] = None) -> Dict[str, str]:
-        """
-        AES-256-GCM encrypt; returns base64 encoded fields.
-        """
-        aesgcm = AESGCM(self.aes_key)
-        nonce = os.urandom(NONCE_SIZE)
-        ct = aesgcm.encrypt(nonce, plaintext, associated_data)
-        return {
-            "nonce": base64.b64encode(nonce).decode("utf-8"),
-            "ciphertext": base64.b64encode(ct).decode("utf-8"),
-        }
-
-    def decrypt(self, nonce_b64: str, ciphertext_b64: str, associated_data: Optional[bytes] = None) -> bytes:
-        aesgcm = AESGCM(self.aes_key)
-        nonce = base64.b64decode(nonce_b64)
-        ct = base64.b64decode(ciphertext_b64)
-        return aesgcm.decrypt(nonce, ct, associated_data)
-
-    def sign(self, data: bytes) -> str:
-        """
-        Sign with RSA-PSS (recommended). Returns base64 signature.
-        """
-        if not self.rsa_private_pem:
-            raise RuntimeError("Private RSA key not available")
-        priv = serialization.load_pem_private_key(self.rsa_private_pem, password=None)
-        sig = priv.sign(
-            data,
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-            hashes.SHA256(),
-        )
-        return base64.b64encode(sig).decode("utf-8")
-
-    def verify(self, data: bytes, signature_b64: str) -> bool:
-        pub = crypto_serialization.load_pem_public_key(self.rsa_public_pem)
-        sig = base64.b64decode(signature_b64)
-        try:
-            pub.verify(
-                sig,
-                data,
-                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-                hashes.SHA256(),
-            )
-            return True
-        except Exception:
-            return False
-
-
-# ---------------------------
-# Key management helper (stub for KMS/HSM)
-# ---------------------------
-class KeyManager:
-    """
-    Very small KMS abstraction. Replace with your enterprise KMS/HSM calls.
-    - get_crypto_bundle should fetch keys from HSM or KMS with proper access control.
-    - rotate_keys should perform rotation and re-encrypt any stored secrets with new keys.
-    """
-    def __init__(self, storage_path: str = "./keystore.json"):
-        self.storage_path = storage_path
-        self._cache: Optional[CryptoBundle] = None
-
-    def bootstrap(self) -> CryptoBundle:
-        if os.path.exists(self.storage_path):
-            with open(self.storage_path, "rb") as f:
-                data = json.load(f)
-            bundle = CryptoBundle(
-                aes_key=base64.b64decode(data["aes_key"]),
-                hmac_key=base64.b64decode(data["hmac_key"]),
-                rsa_private_pem=base64.b64decode(data["rsa_private_pem"]) if data.get("rsa_private_pem") else None,
-                rsa_public_pem=base64.b64decode(data["rsa_public_pem"]) if data.get("rsa_public_pem") else None,
-            )
-            self._cache = bundle
-            return bundle
-        bundle = CryptoBundle.generate()
-        self.store(bundle)
-        self._cache = bundle
-        return bundle
-
-    def store(self, bundle: CryptoBundle) -> None:
-        # In production, never write private_pem unencrypted to disk.
-        payload = {
-            "aes_key": base64.b64encode(bundle.aes_key).decode("utf-8"),
-            "hmac_key": base64.b64encode(bundle.hmac_key).decode("utf-8"),
-            "rsa_private_pem": base64.b64encode(bundle.rsa_private_pem).decode("utf-8") if bundle.rsa_private_pem else None,
-            "rsa_public_pem": base64.b64encode(bundle.rsa_public_pem).decode("utf-8") if bundle.rsa_public_pem else None,
-        }
-        with open(self.storage_path, "w") as f:
-            json.dump(payload, f)
-
-    def get_crypto_bundle(self) -> CryptoBundle:
-        if self._cache:
-            return self._cache
-        return self.bootstrap()
-
-    def rotate_keys(self) -> CryptoBundle:
-        # Rotate keys: generate new bundle, store, and return. Real migrations need re-encryption of at-rest data.
-        bundle = CryptoBundle.generate()
-        self.store(bundle)
-        self._cache = bundle
-        return bundle
-
-
-# ---------------------------
-# Watchtower framework
-# ---------------------------
-class Watchtower:
-    """
-    Base class for all Watchtowers. Each watchtower consumes events (network logs, file hashes, email metadata, etc.)
-    and issues findings via the `handle_finding` method. Implement detection logic in `analyze`.
-    """
-    def __init__(self, name: str, km: KeyManager):
-        self.name = name
-        self.km = km
-        self.bundle = km.get_crypto_bundle()
-        self.hmac_key = self.bundle.hmac_key
-        self.audit_prefix = f"WT:{self.name}"
-        # detection callback (optional) - used to integrate with incident response
-        self.on_alert: Optional[Callable[[Dict[str, Any]], None]] = None
-
-    async def ingest_event(self, event: Dict[str, Any]) -> None:
-        """
-        Ingest raw event. This is where you integrate Kafka, RabbitMQ, syslog, SIEM or file watchers.
-        Keep this small and fast; hand off heavy analysis to worker tasks if needed.
-        """
-        ts = int(time.time())
-        entry = {"watchtower": self.name, "ts": ts, "event": event}
-        secure_audit_append({"prefix": self.audit_prefix, "ingest": entry}, self.hmac_key)
-        try:
-            res = await self.analyze(event)
-            if res:
-                await self.handle_finding(res)
-        except Exception as e:
-            logger.exception(f"{self.name} analyze error: {str(e)}")
-            secure_audit_append({"prefix": self.audit_prefix, "error": str(e)}, self.hmac_key)
-
-    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Override in subclasses with detection logic. Return finding dict or None.
-        """
-        raise NotImplementedError
-
-    async def handle_finding(self, finding: Dict[str, Any]) -> None:
-        """
-        Default alert handling: sign, store audit, call callback if configured.
-        """
-        payload = json.dumps({"watchtower": self.name, "finding": finding, "timestamp": int(time.time())}, separators=(',', ':'))
-        sig = self.bundle.sign(payload.encode("utf-8"))
-        secure_audit_append({"prefix": self.audit_prefix, "finding": finding, "signature": sig}, self.hmac_key)
-        logger.warning(f"{self.name} ALERT: {payload} SIG={sig}")
-        if self.on_alert:
-            try:
-                self.on_alert({"watchtower": self.name, "finding": finding, "signature": sig})
-            except Exception:
-                logger.exception("on_alert callback failed")
-
-
-# ---------------------------
-# Concrete Watchtowers
-# ---------------------------
-class SelfDefenseWatchtower(Watchtower):
-    """
-    Monitors defensive wall / policy state and detects misconfigurations, drifts, or unauthorized modifications.
-    Input events: policy-check-results, firewall-rule-change events, config diffs.
-    """
-    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        # Simple heuristics + drift detection stub
-        if event.get("type") == "policy_change" and event.get("source") not in ("authorized_admin", "kms_rotation"):
-            return {"severity": "high", "reason": "unauthorized_policy_change", "event": event}
-        # Example: drift metric > threshold -> alert
-        drift = event.get("config_drift_score", 0)
-        if drift and drift > 0.25:
-            return {"severity": "medium", "reason": "config_drift", "drift_score": drift}
-        return None
-
-
-class EmailIOWatchtower(Watchtower):
-    """
-    Lightweight email metadata watcher. Monitors senders/recipients, attachments, volume spikes,
-    and suspicious header anomalies. DOES NOT DECRYPT encrypted mail.
-    """
-    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        # event expected keys: type=email, from, to, subject, attachments_count, size_bytes, headers
-        if event.get("type") != "email":
-            return None
-        # high-risk rules
-        if event.get("attachments_count", 0) > 3 and event.get("size_bytes", 0) > 5_000_000:
-            return {"severity": "medium", "reason": "large_attachment_exfil", "meta": {"attachments": event.get("attachments_count")}}
-        # suspicious header check (example)
-        headers = event.get("headers", {})
-        if headers.get("X-Received-From") and "suspicious-relay" in headers.get("X-Received-From"):
-            return {"severity": "high", "reason": "suspicious_relay_header"}
-        # volume spike heuristic (hook to SIEM for baseline)
-        if event.get("volume_spike", False):
-            return {"severity": "low", "reason": "email_volume_spike"}
-        return None
-
-
-class VirusWatchtower(Watchtower):
-    """
-    Monitors file stores, EDR callbacks, and hash alerts. Plug YARA or signature engine at analyze().
-    """
-    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        # event keys: file_hash, path, source, detection_engine, signatures
-        signatures = event.get("signatures", [])
-        if signatures:
-            return {"severity": "high", "reason": "virus_signature_match", "signatures": signatures, "path": event.get("path")}
-        # suspicious PE resources/packing heuristics
-        heur = event.get("heuristic_score", 0)
-        if heur > 0.9:
-            return {"severity": "high", "reason": "heuristic_pe_packed", "score": heur}
-        return None
-
-
-class MalwareWatchtower(Watchtower):
-    """
-    Monitors behavioral telemetry (process injection, persistence, C2 beacons).
-    Expected events from EDR or telemetry feeders.
-    """
-    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if event.get("type") == "process_injection":
-            return {"severity": "critical", "reason": "process_injection", "pid": event.get("pid"), "process": event.get("process")}
-        c2 = event.get("c2_beacon_frequency", 0)
-        if c2 and c2 > 10:  # example heuristic threshold
-            return {"severity": "high", "reason": "c2_beaconing", "freq": c2}
-        return None
-
-
-class SpywareWatchtower(Watchtower):
-    """
-    Monitors telemetry for persistent exfil patterns, mic/camera access, unusual device enumerations.
-    """
-    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if event.get("device_access") in ("camera", "microphone") and event.get("process_owner") not in ("system", "trusted_agent"):
-            return {"severity": "high", "reason": "unauthorized_media_access", "process": event.get("process")}
-        exfil_rate = event.get("exfil_rate_kb_s", 0)
-        if exfil_rate and exfil_rate > 100:  # example threshold
-            return {"severity": "high", "reason": "suspicious_exfil", "rate": exfil_rate}
-        return None
-
-
-class PhishingWatchtower(Watchtower):
-    """
-    Monitors inbound messages, impersonation heuristics, domain lookups, and credential harvest heuristics.
-    """
-    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        # event keys: type=email/sms/web, domain_age_days, similarity_score, url_clicks
-        sim = event.get("similarity_score", 0.0)
-        domain_age = event.get("domain_age_days", 999999)
-        if sim > 0.85 and domain_age < 365:
-            return {"severity": "high", "reason": "impersonation_domain", "similarity": sim, "domain_age": domain_age}
-        if event.get("credential_submission", False):
-            return {"severity": "critical", "reason": "credential_capture", "user": event.get("user")}
-        return None
-
-
-# ---------------------------
-# Factory + orchestration helpers
-# ---------------------------
-def build_watchtowers(km: KeyManager) -> Dict[str, Watchtower]:
-    towers: Dict[str, Watchtower] = {}
-    towers["self_defense"] = SelfDefenseWatchtower("self_defense", km)
-    towers["email_io"] = EmailIOWatchtower("email_io", km)
-    towers["virus"] = VirusWatchtower("virus", km)
-    towers["malware"] = MalwareWatchtower("malware", km)
-    towers["spyware"] = SpywareWatchtower("spyware", km)
-    towers["phishing"] = PhishingWatchtower("phishing", km)
-    return towers
-
-
-async def route_event_to_watchtowers(event: Dict[str, Any], towers: Dict[str, Watchtower]) -> None:
-    """
-    Simple router — decide which watchtowers should receive this event based on its type.
-    This routing can be swapped for a real message bus (Kafka), or direct ingestion paths.
-    """
-    typ = event.get("type")
-    tasks = []
-
-    # simple routing heuristics
-    if typ == "email":
-        tasks.append(towers["email_io"].ingest_event(event))
-        tasks.append(towers["phishing"].ingest_event(event))
-    elif typ == "file":
-        tasks.append(towers["virus"].ingest_event(event))
-        tasks.append(towers["malware"].ingest_event(event))
-        tasks.append(towers["spyware"].ingest_event(event))
-    elif typ == "network":
-        tasks.append(towers["malware"].ingest_event(event))
-        tasks.append(towers["self_defense"].ingest_event(event))
-    elif typ == "policy":
-        tasks.append(towers["self_defense"].ingest_event(event))
-    else:
-        # broadcast for unknown event types
-        for t in towers.values():
-            tasks.append(t.ingest_event(event))
-    await asyncio.gather(*tasks)
-
-
-# ---------------------------
-# Example usage (for tests/demo)
-# ---------------------------
-if __name__ == "__main__":
-    async def demo():
-        km = KeyManager()
-        km.bootstrap()
-        towers = build_watchtowers(km)
-
-        # sample email event
-        email_event = {
-            "type": "email",
-            "from": "ceo@trusted.example",
-            "to": ["ops@company.example"],
-            "subject": "Quarterly report",
-            "attachments_count": 4,
-            "size_bytes": 6_000_000,
-            "headers": {"X-Received-From": "suspicious-relay.example"},
-            "volume_spike": False
-        }
-
-        # sample file event (virus)
-        file_event = {
-            "type": "file",
-            "path": "/tmp/upload/evil.exe",
-            "file_hash": "abcd1234",
-            "signatures": ["EICAR-TestSig"],
-            "heuristic_score": 0.99
-        }
-
-        await route_event_to_watchtowers(email_event, towers)
-        await route_event_to_watchtowers(file_event, towers)
-
-    asyncio.run(demo())
+    print("\n--- SCENARIO END ---")
