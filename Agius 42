@@ -368,4 +368,418 @@ if __name__ == "__main__":
         print(f"[{log['timestamp'][:19]}] [{log['module']}] ({log['severity']}) -> {log['description']}")
         
     print(f"\nFinal Cognitive Load Index: {summary['Cognitive_Load_Index']} (Should be 0% after Lockdown)")
-    print("\n--- SCENARIO END ---")
+    print("\n--- SCENARIO END ---")# File: watchtower_watchers.py
+# Purpose: Watchtower framework for Project Aegis — six watchers + secure comms/audit plumbing
+# Requirements: pip install cryptography aiofiles
+# WARNING: Replace key storage with a KMS/HSM (AWS KMS, Azure Key Vault, Vault HSM, or hardware HSM)
+# Do not store private keys on disk in plaintext in production.
+
+from __future__ import annotations
+import os
+import json
+import time
+import asyncio
+import logging
+import hashlib
+import hmac
+import base64
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Callable
+from logging.handlers import RotatingFileHandler
+
+# cryptography libs
+from cryptography.hazmat.primitives import hashes, serialization, hmac as crypto_hmac
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives.asymmetric import utils as asym_utils
+from cryptography.hazmat.primitives import serialization as crypto_serialization
+
+# ---------------------------
+# Config + constants
+# ---------------------------
+AUDIT_LOG_PATH = os.environ.get("WATCHTOWER_AUDIT_LOG", "./watchtower_audit.log")
+ROTATE_BYTES = 10 * 1024 * 1024  # 10 MB log rotation
+KEY_SIZE_AES = 32  # 256-bit AES
+NONCE_SIZE = 12  # recommended for AES-GCM
+HMAC_KEY_SIZE = 32
+
+# ---------------------------
+# Logging / Audit ledger
+# ---------------------------
+logger = logging.getLogger("watchtower")
+logger.setLevel(logging.INFO)
+handler = RotatingFileHandler(AUDIT_LOG_PATH, maxBytes=ROTATE_BYTES, backupCount=7)
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+
+def secure_audit_append(entry: Dict[str, Any], hmac_key: bytes) -> None:
+    """
+    Append an audit entry in JSON with an HMAC for later verification.
+    Write to rotating logfile (as configured).
+    """
+    payload = json.dumps(entry, separators=(',', ':'), sort_keys=True)
+    h = hmac.new(hmac_key, payload.encode("utf-8"), hashlib.sha256).digest()
+    b64_sig = base64.b64encode(h).decode("utf-8")
+    logger.info(f"AUDIT {payload} HMAC={b64_sig}")
+
+
+# ---------------------------
+# Crypto utilities
+# ---------------------------
+@dataclass
+class CryptoBundle:
+    aes_key: bytes
+    hmac_key: bytes
+    rsa_private_pem: Optional[bytes] = None
+    rsa_public_pem: Optional[bytes] = None
+
+    @classmethod
+    def generate(cls, rsa_bits: int = 4096) -> "CryptoBundle":
+        aes_key = os.urandom(KEY_SIZE_AES)
+        hmac_key = os.urandom(HMAC_KEY_SIZE)
+        # Generate ephemeral RSA keypair (in prod, use KMS/HSM)
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=rsa_bits)
+        priv_pem = private_key.private_bytes(
+            encoding=crypto_serialization.Encoding.PEM,
+            format=crypto_serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=crypto_serialization.NoEncryption(),
+        )
+        pub_pem = private_key.public_key().public_bytes(
+            encoding=crypto_serialization.Encoding.PEM,
+            format=crypto_serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return cls(aes_key=aes_key, hmac_key=hmac_key, rsa_private_pem=priv_pem, rsa_public_pem=pub_pem)
+
+    def encrypt(self, plaintext: bytes, associated_data: Optional[bytes] = None) -> Dict[str, str]:
+        """
+        AES-256-GCM encrypt; returns base64 encoded fields.
+        """
+        aesgcm = AESGCM(self.aes_key)
+        nonce = os.urandom(NONCE_SIZE)
+        ct = aesgcm.encrypt(nonce, plaintext, associated_data)
+        return {
+            "nonce": base64.b64encode(nonce).decode("utf-8"),
+            "ciphertext": base64.b64encode(ct).decode("utf-8"),
+        }
+
+    def decrypt(self, nonce_b64: str, ciphertext_b64: str, associated_data: Optional[bytes] = None) -> bytes:
+        aesgcm = AESGCM(self.aes_key)
+        nonce = base64.b64decode(nonce_b64)
+        ct = base64.b64decode(ciphertext_b64)
+        return aesgcm.decrypt(nonce, ct, associated_data)
+
+    def sign(self, data: bytes) -> str:
+        """
+        Sign with RSA-PSS (recommended). Returns base64 signature.
+        """
+        if not self.rsa_private_pem:
+            raise RuntimeError("Private RSA key not available")
+        priv = serialization.load_pem_private_key(self.rsa_private_pem, password=None)
+        sig = priv.sign(
+            data,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+            hashes.SHA256(),
+        )
+        return base64.b64encode(sig).decode("utf-8")
+
+    def verify(self, data: bytes, signature_b64: str) -> bool:
+        pub = crypto_serialization.load_pem_public_key(self.rsa_public_pem)
+        sig = base64.b64decode(signature_b64)
+        try:
+            pub.verify(
+                sig,
+                data,
+                padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+                hashes.SHA256(),
+            )
+            return True
+        except Exception:
+            return False
+
+
+# ---------------------------
+# Key management helper (stub for KMS/HSM)
+# ---------------------------
+class KeyManager:
+    """
+    Very small KMS abstraction. Replace with your enterprise KMS/HSM calls.
+    - get_crypto_bundle should fetch keys from HSM or KMS with proper access control.
+    - rotate_keys should perform rotation and re-encrypt any stored secrets with new keys.
+    """
+    def __init__(self, storage_path: str = "./keystore.json"):
+        self.storage_path = storage_path
+        self._cache: Optional[CryptoBundle] = None
+
+    def bootstrap(self) -> CryptoBundle:
+        if os.path.exists(self.storage_path):
+            with open(self.storage_path, "rb") as f:
+                data = json.load(f)
+            bundle = CryptoBundle(
+                aes_key=base64.b64decode(data["aes_key"]),
+                hmac_key=base64.b64decode(data["hmac_key"]),
+                rsa_private_pem=base64.b64decode(data["rsa_private_pem"]) if data.get("rsa_private_pem") else None,
+                rsa_public_pem=base64.b64decode(data["rsa_public_pem"]) if data.get("rsa_public_pem") else None,
+            )
+            self._cache = bundle
+            return bundle
+        bundle = CryptoBundle.generate()
+        self.store(bundle)
+        self._cache = bundle
+        return bundle
+
+    def store(self, bundle: CryptoBundle) -> None:
+        # In production, never write private_pem unencrypted to disk.
+        payload = {
+            "aes_key": base64.b64encode(bundle.aes_key).decode("utf-8"),
+            "hmac_key": base64.b64encode(bundle.hmac_key).decode("utf-8"),
+            "rsa_private_pem": base64.b64encode(bundle.rsa_private_pem).decode("utf-8") if bundle.rsa_private_pem else None,
+            "rsa_public_pem": base64.b64encode(bundle.rsa_public_pem).decode("utf-8") if bundle.rsa_public_pem else None,
+        }
+        with open(self.storage_path, "w") as f:
+            json.dump(payload, f)
+
+    def get_crypto_bundle(self) -> CryptoBundle:
+        if self._cache:
+            return self._cache
+        return self.bootstrap()
+
+    def rotate_keys(self) -> CryptoBundle:
+        # Rotate keys: generate new bundle, store, and return. Real migrations need re-encryption of at-rest data.
+        bundle = CryptoBundle.generate()
+        self.store(bundle)
+        self._cache = bundle
+        return bundle
+
+
+# ---------------------------
+# Watchtower framework
+# ---------------------------
+class Watchtower:
+    """
+    Base class for all Watchtowers. Each watchtower consumes events (network logs, file hashes, email metadata, etc.)
+    and issues findings via the `handle_finding` method. Implement detection logic in `analyze`.
+    """
+    def __init__(self, name: str, km: KeyManager):
+        self.name = name
+        self.km = km
+        self.bundle = km.get_crypto_bundle()
+        self.hmac_key = self.bundle.hmac_key
+        self.audit_prefix = f"WT:{self.name}"
+        # detection callback (optional) - used to integrate with incident response
+        self.on_alert: Optional[Callable[[Dict[str, Any]], None]] = None
+
+    async def ingest_event(self, event: Dict[str, Any]) -> None:
+        """
+        Ingest raw event. This is where you integrate Kafka, RabbitMQ, syslog, SIEM or file watchers.
+        Keep this small and fast; hand off heavy analysis to worker tasks if needed.
+        """
+        ts = int(time.time())
+        entry = {"watchtower": self.name, "ts": ts, "event": event}
+        secure_audit_append({"prefix": self.audit_prefix, "ingest": entry}, self.hmac_key)
+        try:
+            res = await self.analyze(event)
+            if res:
+                await self.handle_finding(res)
+        except Exception as e:
+            logger.exception(f"{self.name} analyze error: {str(e)}")
+            secure_audit_append({"prefix": self.audit_prefix, "error": str(e)}, self.hmac_key)
+
+    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Override in subclasses with detection logic. Return finding dict or None.
+        """
+        raise NotImplementedError
+
+    async def handle_finding(self, finding: Dict[str, Any]) -> None:
+        """
+        Default alert handling: sign, store audit, call callback if configured.
+        """
+        payload = json.dumps({"watchtower": self.name, "finding": finding, "timestamp": int(time.time())}, separators=(',', ':'))
+        sig = self.bundle.sign(payload.encode("utf-8"))
+        secure_audit_append({"prefix": self.audit_prefix, "finding": finding, "signature": sig}, self.hmac_key)
+        logger.warning(f"{self.name} ALERT: {payload} SIG={sig}")
+        if self.on_alert:
+            try:
+                self.on_alert({"watchtower": self.name, "finding": finding, "signature": sig})
+            except Exception:
+                logger.exception("on_alert callback failed")
+
+
+# ---------------------------
+# Concrete Watchtowers
+# ---------------------------
+class SelfDefenseWatchtower(Watchtower):
+    """
+    Monitors defensive wall / policy state and detects misconfigurations, drifts, or unauthorized modifications.
+    Input events: policy-check-results, firewall-rule-change events, config diffs.
+    """
+    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Simple heuristics + drift detection stub
+        if event.get("type") == "policy_change" and event.get("source") not in ("authorized_admin", "kms_rotation"):
+            return {"severity": "high", "reason": "unauthorized_policy_change", "event": event}
+        # Example: drift metric > threshold -> alert
+        drift = event.get("config_drift_score", 0)
+        if drift and drift > 0.25:
+            return {"severity": "medium", "reason": "config_drift", "drift_score": drift}
+        return None
+
+
+class EmailIOWatchtower(Watchtower):
+    """
+    Lightweight email metadata watcher. Monitors senders/recipients, attachments, volume spikes,
+    and suspicious header anomalies. DOES NOT DECRYPT encrypted mail.
+    """
+    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # event expected keys: type=email, from, to, subject, attachments_count, size_bytes, headers
+        if event.get("type") != "email":
+            return None
+        # high-risk rules
+        if event.get("attachments_count", 0) > 3 and event.get("size_bytes", 0) > 5_000_000:
+            return {"severity": "medium", "reason": "large_attachment_exfil", "meta": {"attachments": event.get("attachments_count")}}
+        # suspicious header check (example)
+        headers = event.get("headers", {})
+        if headers.get("X-Received-From") and "suspicious-relay" in headers.get("X-Received-From"):
+            return {"severity": "high", "reason": "suspicious_relay_header"}
+        # volume spike heuristic (hook to SIEM for baseline)
+        if event.get("volume_spike", False):
+            return {"severity": "low", "reason": "email_volume_spike"}
+        return None
+
+
+class VirusWatchtower(Watchtower):
+    """
+    Monitors file stores, EDR callbacks, and hash alerts. Plug YARA or signature engine at analyze().
+    """
+    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # event keys: file_hash, path, source, detection_engine, signatures
+        signatures = event.get("signatures", [])
+        if signatures:
+            return {"severity": "high", "reason": "virus_signature_match", "signatures": signatures, "path": event.get("path")}
+        # suspicious PE resources/packing heuristics
+        heur = event.get("heuristic_score", 0)
+        if heur > 0.9:
+            return {"severity": "high", "reason": "heuristic_pe_packed", "score": heur}
+        return None
+
+
+class MalwareWatchtower(Watchtower):
+    """
+    Monitors behavioral telemetry (process injection, persistence, C2 beacons).
+    Expected events from EDR or telemetry feeders.
+    """
+    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if event.get("type") == "process_injection":
+            return {"severity": "critical", "reason": "process_injection", "pid": event.get("pid"), "process": event.get("process")}
+        c2 = event.get("c2_beacon_frequency", 0)
+        if c2 and c2 > 10:  # example heuristic threshold
+            return {"severity": "high", "reason": "c2_beaconing", "freq": c2}
+        return None
+
+
+class SpywareWatchtower(Watchtower):
+    """
+    Monitors telemetry for persistent exfil patterns, mic/camera access, unusual device enumerations.
+    """
+    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if event.get("device_access") in ("camera", "microphone") and event.get("process_owner") not in ("system", "trusted_agent"):
+            return {"severity": "high", "reason": "unauthorized_media_access", "process": event.get("process")}
+        exfil_rate = event.get("exfil_rate_kb_s", 0)
+        if exfil_rate and exfil_rate > 100:  # example threshold
+            return {"severity": "high", "reason": "suspicious_exfil", "rate": exfil_rate}
+        return None
+
+
+class PhishingWatchtower(Watchtower):
+    """
+    Monitors inbound messages, impersonation heuristics, domain lookups, and credential harvest heuristics.
+    """
+    async def analyze(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # event keys: type=email/sms/web, domain_age_days, similarity_score, url_clicks
+        sim = event.get("similarity_score", 0.0)
+        domain_age = event.get("domain_age_days", 999999)
+        if sim > 0.85 and domain_age < 365:
+            return {"severity": "high", "reason": "impersonation_domain", "similarity": sim, "domain_age": domain_age}
+        if event.get("credential_submission", False):
+            return {"severity": "critical", "reason": "credential_capture", "user": event.get("user")}
+        return None
+
+
+# ---------------------------
+# Factory + orchestration helpers
+# ---------------------------
+def build_watchtowers(km: KeyManager) -> Dict[str, Watchtower]:
+    towers: Dict[str, Watchtower] = {}
+    towers["self_defense"] = SelfDefenseWatchtower("self_defense", km)
+    towers["email_io"] = EmailIOWatchtower("email_io", km)
+    towers["virus"] = VirusWatchtower("virus", km)
+    towers["malware"] = MalwareWatchtower("malware", km)
+    towers["spyware"] = SpywareWatchtower("spyware", km)
+    towers["phishing"] = PhishingWatchtower("phishing", km)
+    return towers
+
+
+async def route_event_to_watchtowers(event: Dict[str, Any], towers: Dict[str, Watchtower]) -> None:
+    """
+    Simple router — decide which watchtowers should receive this event based on its type.
+    This routing can be swapped for a real message bus (Kafka), or direct ingestion paths.
+    """
+    typ = event.get("type")
+    tasks = []
+
+    # simple routing heuristics
+    if typ == "email":
+        tasks.append(towers["email_io"].ingest_event(event))
+        tasks.append(towers["phishing"].ingest_event(event))
+    elif typ == "file":
+        tasks.append(towers["virus"].ingest_event(event))
+        tasks.append(towers["malware"].ingest_event(event))
+        tasks.append(towers["spyware"].ingest_event(event))
+    elif typ == "network":
+        tasks.append(towers["malware"].ingest_event(event))
+        tasks.append(towers["self_defense"].ingest_event(event))
+    elif typ == "policy":
+        tasks.append(towers["self_defense"].ingest_event(event))
+    else:
+        # broadcast for unknown event types
+        for t in towers.values():
+            tasks.append(t.ingest_event(event))
+    await asyncio.gather(*tasks)
+
+
+# ---------------------------
+# Example usage (for tests/demo)
+# ---------------------------
+if __name__ == "__main__":
+    async def demo():
+        km = KeyManager()
+        km.bootstrap()
+        towers = build_watchtowers(km)
+
+        # sample email event
+        email_event = {
+            "type": "email",
+            "from": "ceo@trusted.example",
+            "to": ["ops@company.example"],
+            "subject": "Quarterly report",
+            "attachments_count": 4,
+            "size_bytes": 6_000_000,
+            "headers": {"X-Received-From": "suspicious-relay.example"},
+            "volume_spike": False
+        }
+
+        # sample file event (virus)
+        file_event = {
+            "type": "file",
+            "path": "/tmp/upload/evil.exe",
+            "file_hash": "abcd1234",
+            "signatures": ["EICAR-TestSig"],
+            "heuristic_score": 0.99
+        }
+
+        await route_event_to_watchtowers(email_event, towers)
+        await route_event_to_watchtowers(file_event, towers)
+
+    asyncio.run(demo())
