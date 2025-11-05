@@ -2,102 +2,119 @@ import platform
 import subprocess
 import datetime
 import random
-import sys 
-from typing import Dict, Any, List, Optional # <- Added Optional import here
+import sys
+import hmac
+import hashlib
+import json
+import logging
+import shutil
+import time
+from typing import Dict, Any, List, Optional, Protocol
+from dataclasses import dataclass, asdict
+
+# ---------- Setup logging ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s retail_node %(message)s",
+)
+log = logging.getLogger("retail_node")
+
+# ---------- Simple inventory provider hook ----------
+class InventoryProvider(Protocol):
+    def current_stock(self, sku: str) -> int: ...
+
+class RandomInventory(InventoryProvider):
+    def current_stock(self, sku: str) -> int:
+        return random.randint(50, 150)
+
+# ---------- Transaction model with basic validation ----------
+@dataclass(frozen=True)
+class Transaction:
+    id: str
+    sku: str
+    qty: int
+    amount: float
+
+    def validate(self) -> None:
+        if not self.id or not self.sku:
+            raise ValueError("Transaction id and sku are required")
+        if self.qty <= 0:
+            raise ValueError("qty must be > 0")
+        if self.amount < 0:
+            raise ValueError("amount must be >= 0")
 
 class RetailNode:
     """
-    Project Yggdrasil: Upgraded Retail Node
-    Handles core Point-of-Sale (POS) functions, compliance checks, and secure
-    logging to the simulated CPA Chain and Witness Mesh.
-    Version 2.0 includes robust, non-shell-dependent runtime detection.
+    Project Yggdrasil: Upgraded Retail Node (V2.1)
+    - Structured logging
+    - HMAC-backed witness signing
+    - Runtime probing with which()
+    - Bounded, persistent offline cache
+    - Basic schema validation
     """
-    def __init__(self):
-        # Configuration and State
+    HMAC_SECRET = b"witness-mesh-secret"  # replace via env/keystore in prod
+    OFFLINE_CACHE_PATH = "offline_cache.jsonl"
+    OFFLINE_CACHE_MAX = 10_000  # guardrail
+
+    def __init__(self, inventory_provider: Optional[InventoryProvider] = None):
         self.compliance_status: bool = True
         self.os_name: str = self.detect_os()
         self.runtimes: Dict[str, Any] = self.detect_runtimes()
-        
-        # Data Stores
+        self.inventory: InventoryProvider = inventory_provider or RandomInventory()
+
         self.pos_logs: List[Dict[str, Any]] = []
         self.sales_data: List[Dict[str, Any]] = []
         self.reorder_flags: List[Dict[str, Any]] = []
         self.offline_cache: List[Dict[str, Any]] = []
+        self._load_offline_cache()
 
-    def log_to_cpa_chain(self, message: str):
-        """Simulates logging critical operational data to the CPA (Consensus Protocol Authority) Chain."""
-        timestamp = datetime.datetime.utcnow().isoformat()
-        print(f"[CPA LOG] {timestamp} - {message}")
+    # ---------- CPA / Witness ----------
+    def log_to_cpa_chain(self, message: str, **fields):
+        payload = {"msg": message, **fields}
+        log.info("[CPA] %s", json.dumps(payload, separators=(",", ":")))
 
-    def witness_mesh_sign(self, message: str):
-        """Simulates cryptographically signing an event for the Witness Mesh ledger."""
-        print(f"[WITNESS MESH SIGNED] {message}")
+    def witness_mesh_sign(self, message: str, **fields):
+        payload = {"msg": message, **fields}
+        digest = hmac.new(self.HMAC_SECRET, json.dumps(payload, sort_keys=True).encode(), hashlib.sha256).hexdigest()
+        log.info("[WITNESS] %s", json.dumps({"payload": payload, "sig": digest}, separators=(",", ":")))
 
+    # ---------- Runtime / OS ----------
     def detect_os(self) -> str:
-        """Detects the operating system of the host machine."""
         os_name = platform.system()
-        self.log_to_cpa_chain(f"Retail Node OS: {os_name}")
-        self.witness_mesh_sign("OS Detection Signed")
+        self.log_to_cpa_chain("Retail Node OS detected", os=os_name)
+        self.witness_mesh_sign("OS Detection Signed", os=os_name)
         return os_name
 
-    def _check_runtime_safe(self, command: List[str]) -> Optional[str]: # <- Corrected type hint here
-        """
-        Safely attempts to run a command to get a version string without using 'shell=True'.
-        Returns the version string or None if the command fails or times out.
-        """
+    def _safe_run(self, command: List[str]) -> Optional[str]:
+        exe = command[0]
+        if shutil.which(exe) is None:
+            return None
         try:
-            # Use subprocess.run for better control, error handling, and security
-            result = subprocess.run(
-                command, 
-                capture_output=True, 
-                text=True, 
-                timeout=5, # Added a timeout for safety
-                check=False # Do not raise an exception for non-zero exit codes
-            )
-            
-            # Check if the command executed successfully (exit code 0)
-            if result.returncode == 0:
-                output = result.stdout.strip()
-                # Special handling for Java which often prints version to stderr
-                if not output and 'java' in command[0] and result.stderr:
-                    output = result.stderr.strip().split('\n')[0]
-                
-                return output if output else f"Found (Exit Code {result.returncode})"
-
-            return None
-        except FileNotFoundError:
-            # Executable not found in PATH
-            return None
+            result = subprocess.run(command, capture_output=True, text=True, timeout=3, check=False)
+            out = (result.stdout or result.stderr or "").strip()
+            return out.splitlines()[0] if out else f"Found (Exit Code {result.returncode})"
         except Exception as e:
-            # Catch other potential issues (like the timeout)
-            self.log_to_cpa_chain(f"Error checking runtime {command[0]}: {e}")
+            self.log_to_cpa_chain("Runtime probe error", command=command, error=str(e))
             return None
 
     def detect_runtimes(self) -> Dict[str, Any]:
-        """Detects the installed runtimes using safer checks."""
         runtimes = {
-            # Use sys for Python's own version (most reliable)
-            "Python": sys.version.split('\n')[0],
-            # Use list format for command to avoid shell injection risk
-            "Node.js": self._check_runtime_safe(["node", "--version"]),
-            "Java": self._check_runtime_safe(["java", "-version"]),
-            "Go": self._check_runtime_safe(["go", "version"]),
-            "Ruby": self._check_runtime_safe(["ruby", "--version"]),
+            "Python": sys.version.split("\n")[0],
+            "Node.js": self._safe_run(["node", "--version"]),
+            "Java": self._safe_run(["java", "-version"]),  # stderr handled
+            "Go": self._safe_run(["go", "version"]),
+            "Ruby": self._safe_run(["ruby", "--version"]),
         }
-        
-        # Windows-specific check
         if self.os_name == "Windows":
-            runtimes["PowerShell"] = self._check_runtime_safe(["powershell", "-command", "$PSVersionTable.PSVersion.ToString()"])
+            ps = self._safe_run(["powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"])
+            if ps: runtimes["PowerShell"] = ps
+        active = {k: v for k, v in runtimes.items() if v}
+        self.log_to_cpa_chain("Retail runtimes detected", runtimes=active)
+        self.witness_mesh_sign("Runtime Detection Signed", count=len(active))
+        return active
 
-        # Filter out runtimes that were not found (value is None)
-        active_runtimes = {k: v for k, v in runtimes.items() if v is not None}
-
-        self.log_to_cpa_chain(f"Retail Runtimes Detected: {active_runtimes}")
-        self.witness_mesh_sign("Runtime Detection Signed")
-        return active_runtimes
-
+    # ---------- Compliance ----------
     def verify_compliance(self):
-        """Checks if the node is compliant with central security policy."""
         if not self.compliance_status:
             self.log_to_cpa_chain("Retail Compliance Violation! Node Locked.")
             self.witness_mesh_sign("Compliance Lockdown Signed")
@@ -107,90 +124,119 @@ class RetailNode:
             self.witness_mesh_sign("Compliance OK Signed")
 
     def lock_node(self):
-        """Disables the node in case of a compliance breach."""
-        print("!!! RETAIL NODE LOCKED DOWN !!!")
         self.log_to_cpa_chain("Retail Node Disabled Due to Compliance Breach")
         self.witness_mesh_sign("Node Lockdown Signed")
+        # Future: raise a custom exception to stop flows programmatically
 
+    def _ensure_unlocked(self):
+        if not self.compliance_status:
+            raise PermissionError("Retail node is locked due to compliance failure")
+
+    # ---------- POS ----------
     def record_pos_sale(self, transaction: Dict[str, Any]):
-        """Records a successful POS transaction and logs it."""
-        self.sales_data.append(transaction)
-        self.pos_logs.append({
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "transaction": transaction
-        })
-        self.log_to_cpa_chain(f"POS Sale Recorded: {transaction.get('sku', 'Unknown SKU')}")
-        self.witness_mesh_sign("POS Sale Signed")
+        self._ensure_unlocked()
+        tx = Transaction(**transaction)
+        tx.validate()
+
+        self.sales_data.append(asdict(tx))
+        entry = {"timestamp": datetime.datetime.utcnow().isoformat(), "transaction": asdict(tx)}
+        self.pos_logs.append(entry)
+
+        self.log_to_cpa_chain("POS Sale Recorded", sku=tx.sku, qty=tx.qty, amount=tx.amount)
+        self.witness_mesh_sign("POS Sale Signed", id=tx.id, sku=tx.sku)
 
     def daily_sales_sync(self):
-        """Simulates synchronizing all recorded sales data to the central network."""
+        self._ensure_unlocked()
         count = len(self.sales_data)
-        self.log_to_cpa_chain(f"Daily Sales Sync: {count} transactions processed")
-        self.witness_mesh_sign("Daily Sync Signed")
-        self.sales_data.clear() # Clear data after successful sync
+        self.log_to_cpa_chain("Daily Sales Sync started", count=count)
+        self.witness_mesh_sign("Daily Sync Signed", count=count)
+        self.sales_data.clear()
 
-    def check_reorder_trigger(self, predictive_demand: int):
-        """Checks inventory levels against predictive demand to trigger a reorder."""
-        stock_level = random.randint(50, 150)  # Placeholder for real inventory API call
-        
-        self.log_to_cpa_chain(f"Current Stock Level: {stock_level} vs Predicted Demand: {predictive_demand}")
-        
+    # ---------- Reorder ----------
+    def check_reorder_trigger(self, predictive_demand: int, sku: str = "DEFAULT-SKU"):
+        self._ensure_unlocked()
+        stock_level = self.inventory.current_stock(sku)
+        self.log_to_cpa_chain("Stock vs Demand", stock=stock_level, demand=predictive_demand, sku=sku)
+
         if stock_level < predictive_demand:
             reorder_qty = predictive_demand - stock_level
-            self.reorder_flags.append({
-                "timestamp": datetime.datetime.utcnow().isoformat(),
-                "needed": reorder_qty
-            })
-            self.log_to_cpa_chain(f"Reorder Triggered for {reorder_qty} units (Stock: {stock_level})")
-            self.witness_mesh_sign("Reorder Flag Signed")
+            flag = {"timestamp": datetime.datetime.utcnow().isoformat(), "needed": reorder_qty, "sku": sku}
+            self.reorder_flags.append(flag)
+            self.log_to_cpa_chain("Reorder Triggered", sku=sku, qty=reorder_qty)
+            self.witness_mesh_sign("Reorder Flag Signed", sku=sku, qty=reorder_qty)
+
+    # ---------- Offline cache (persisted) ----------
+    def _load_offline_cache(self):
+        try:
+            with open(self.OFFLINE_CACHE_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    self.offline_cache.append(json.loads(line))
+            self.log_to_cpa_chain("Offline cache loaded", count=len(self.offline_cache))
+        except FileNotFoundError:
+            pass
+
+    def _append_offline_file(self, tx: Dict[str, Any]):
+        with open(self.OFFLINE_CACHE_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(tx, separators=(",", ":")) + "\n")
 
     def offline_cache_transaction(self, transaction: Dict[str, Any]):
-        """Caches a transaction for later push if the central network is unavailable."""
-        self.offline_cache.append(transaction)
-        self.log_to_cpa_chain(f"Transaction Cached Offline: {transaction.get('sku', 'Unknown SKU')}")
+        tx = Transaction(**transaction)
+        tx.validate()
+        if len(self.offline_cache) >= self.OFFLINE_CACHE_MAX:
+            self.log_to_cpa_chain("Offline cache full, dropping oldest")
+            self.offline_cache.pop(0)
+        self.offline_cache.append(asdict(tx))
+        self._append_offline_file(asdict(tx))
+        self.log_to_cpa_chain("Transaction Cached Offline", sku=tx.sku, id=tx.id)
 
-    def push_offline_cache(self):
-        """Pushes cached offline transactions to sales data when network connectivity is restored."""
-        if self.offline_cache:
-            count = len(self.offline_cache)
-            self.sales_data.extend(self.offline_cache)
-            self.log_to_cpa_chain(f"Pushing {count} Offline Transactions to Sales Queue")
-            self.offline_cache.clear()
-            self.daily_sales_sync() # Sync immediately after push
-        else:
+    def push_offline_cache(self, max_retries: int = 3):
+        if not self.offline_cache:
             self.log_to_cpa_chain("No Offline Cache to Push.")
+            return
+
+        attempt = 0
+        while attempt < max_retries:
+            try:
+                count = len(self.offline_cache)
+                self.sales_data.extend(self.offline_cache)
+                self.log_to_cpa_chain("Pushing Offline Transactions", count=count)
+                self.offline_cache.clear()
+
+                # truncate file
+                open(self.OFFLINE_CACHE_PATH, "w").close()
+                self.daily_sales_sync()
+                return
+            except Exception as e:
+                attempt += 1
+                wait = 2 ** attempt
+                self.log_to_cpa_chain("Offline push failed, retrying", attempt=attempt, wait_s=wait, error=str(e))
+                time.sleep(wait)
+        self.log_to_cpa_chain("Offline push aborted after retries")
 
 if __name__ == "__main__":
-    # === DEMO EXECUTION ===
-    print("--- Initializing Project Yggdrasil Retail Node V2 ---")
+    print("--- Initializing Project Yggdrasil Retail Node V2.1 ---")
+    random.seed(42)  # remove in prod; keeps demos deterministic
     retail = RetailNode()
     print("-" * 40)
-
-    # Display detected runtimes
     print(f"Detected Runtimes: {retail.runtimes}")
     print(f"OS Name: {retail.os_name}")
     print("-" * 40)
 
-    # 1. Simulate POS sale
     retail.record_pos_sale({"id": "T001", "sku": "ABC123", "qty": 2, "amount": 40.00})
-
-    # 2. Predictive check (simulated low stock)
-    retail.check_reorder_trigger(predictive_demand=120)
-
-    # 3. Compliance check pass
+    retail.check_reorder_trigger(predictive_demand=120, sku="ABC123")
     retail.verify_compliance()
 
-    # 4. Simulate Offline -> Cache -> Push scenario
     print("\n--- SIMULATING OFFLINE CACHE AND PUSH ---")
     retail.offline_cache_transaction({"id": "T002", "sku": "XYZ789", "qty": 1, "amount": 15.00})
     retail.offline_cache_transaction({"id": "T003", "sku": "DEF456", "qty": 5, "amount": 25.50})
-    
-    retail.push_offline_cache() # This will trigger a sync
+    retail.push_offline_cache()
 
-    # 5. Simulate a compliance failure
     print("\n--- SIMULATING COMPLIANCE FAILURE ---")
-    retail.compliance_status = False 
-    retail.verify_compliance()
-    
+    retail.compliance_status = False
+    try:
+        retail.verify_compliance()
+        retail.record_pos_sale({"id": "T004", "sku": "LOCKED", "qty": 1, "amount": 1.00})  # will raise
+    except PermissionError as e:
+        log.warning("Blocked while locked: %s", e)
     print("-" * 40)
     print("DEMO ENDED.")
