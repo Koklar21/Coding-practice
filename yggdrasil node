@@ -1,122 +1,196 @@
-# === Project Yggdrasil: Retail Node (Upgraded) === 
-
 import platform
 import subprocess
 import datetime
-import random 
+import random
+import sys 
+from typing import Dict, Any, List, Optional # <- Added Optional import here
 
 class RetailNode:
-    def __init__(self):
-        self.os_name = self.detect_os()
-        self.runtimes = self.detect_runtimes()
-        self.pos_logs = []
-        self.sales_data = []
-        self.reorder_flags = []
-        self.offline_cache = []
-        self.compliance_status = True 
+    """
+    Project Yggdrasil: Upgraded Retail Node
+    Handles core Point-of-Sale (POS) functions, compliance checks, and secure
+    logging to the simulated CPA Chain and Witness Mesh.
+    Version 2.0 includes robust, non-shell-dependent runtime detection.
+    """
+    def __init__(self):
+        # Configuration and State
+        self.compliance_status: bool = True
+        self.os_name: str = self.detect_os()
+        self.runtimes: Dict[str, Any] = self.detect_runtimes()
+        
+        # Data Stores
+        self.pos_logs: List[Dict[str, Any]] = []
+        self.sales_data: List[Dict[str, Any]] = []
+        self.reorder_flags: List[Dict[str, Any]] = []
+        self.offline_cache: List[Dict[str, Any]] = []
 
-    def log_to_cpa_chain(self, message):
-        timestamp = datetime.datetime.utcnow().isoformat()
-        print(f"[CPA LOG] {timestamp} - {message}") 
+    def log_to_cpa_chain(self, message: str):
+        """Simulates logging critical operational data to the CPA (Consensus Protocol Authority) Chain."""
+        timestamp = datetime.datetime.utcnow().isoformat()
+        print(f"[CPA LOG] {timestamp} - {message}")
 
-    def witness_mesh_sign(self, message):
-        print(f"[WITNESS MESH SIGNED] {message}") 
+    def witness_mesh_sign(self, message: str):
+        """Simulates cryptographically signing an event for the Witness Mesh ledger."""
+        print(f"[WITNESS MESH SIGNED] {message}")
 
-    def detect_os(self):
-        os_name = platform.system()
-        self.log_to_cpa_chain(f"Retail Node OS: {os_name}")
-        self.witness_mesh_sign("OS Detection Signed")
-        return os_name 
+    def detect_os(self) -> str:
+        """Detects the operating system of the host machine."""
+        os_name = platform.system()
+        self.log_to_cpa_chain(f"Retail Node OS: {os_name}")
+        self.witness_mesh_sign("OS Detection Signed")
+        return os_name
 
-    def check_runtime(self, command):
-        try:
-            output = subprocess.check_output(command, shell=True).decode().strip()
-            return output
-        except:
-            return None 
+    def _check_runtime_safe(self, command: List[str]) -> Optional[str]: # <- Corrected type hint here
+        """
+        Safely attempts to run a command to get a version string without using 'shell=True'.
+        Returns the version string or None if the command fails or times out.
+        """
+        try:
+            # Use subprocess.run for better control, error handling, and security
+            result = subprocess.run(
+                command, 
+                capture_output=True, 
+                text=True, 
+                timeout=5, # Added a timeout for safety
+                check=False # Do not raise an exception for non-zero exit codes
+            )
+            
+            # Check if the command executed successfully (exit code 0)
+            if result.returncode == 0:
+                output = result.stdout.strip()
+                # Special handling for Java which often prints version to stderr
+                if not output and 'java' in command[0] and result.stderr:
+                    output = result.stderr.strip().split('\n')[0]
+                
+                return output if output else f"Found (Exit Code {result.returncode})"
 
-    def detect_runtimes(self):
-        runtimes = {
-            "Python": self.check_runtime("python --version"),
-            "Node.js": self.check_runtime("node --version"),
-            "Java": self.check_runtime("java -version"),
-            "Go": self.check_runtime("go version"),
-            "Ruby": self.check_runtime("ruby --version"),
-            "PowerShell": self.check_runtime("powershell -command \"$PSVersionTable\"") if self.os_name == "Windows" else None
-        }
-        self.log_to_cpa_chain(f"Retail Runtimes: {runtimes}")
-        self.witness_mesh_sign("Runtime Detection Signed")
-        return runtimes 
+            return None
+        except FileNotFoundError:
+            # Executable not found in PATH
+            return None
+        except Exception as e:
+            # Catch other potential issues (like the timeout)
+            self.log_to_cpa_chain(f"Error checking runtime {command[0]}: {e}")
+            return None
 
-    def verify_compliance(self):
-        if not self.compliance_status:
-            self.log_to_cpa_chain("Retail Compliance Violation! Node Locked.")
-            self.witness_mesh_sign("Compliance Lockdown Signed")
-            self.lock_node()
-        else:
-            self.log_to_cpa_chain("Retail Compliance Verified")
-            self.witness_mesh_sign("Compliance OK Signed") 
+    def detect_runtimes(self) -> Dict[str, Any]:
+        """Detects the installed runtimes using safer checks."""
+        runtimes = {
+            # Use sys for Python's own version (most reliable)
+            "Python": sys.version.split('\n')[0],
+            # Use list format for command to avoid shell injection risk
+            "Node.js": self._check_runtime_safe(["node", "--version"]),
+            "Java": self._check_runtime_safe(["java", "-version"]),
+            "Go": self._check_runtime_safe(["go", "version"]),
+            "Ruby": self._check_runtime_safe(["ruby", "--version"]),
+        }
+        
+        # Windows-specific check
+        if self.os_name == "Windows":
+            runtimes["PowerShell"] = self._check_runtime_safe(["powershell", "-command", "$PSVersionTable.PSVersion.ToString()"])
 
-    def lock_node(self):
-        self.log_to_cpa_chain("Retail Node Disabled Due to Compliance Breach")
-        self.witness_mesh_sign("Node Lockdown Signed") 
+        # Filter out runtimes that were not found (value is None)
+        active_runtimes = {k: v for k, v in runtimes.items() if v is not None}
 
-    def record_pos_sale(self, transaction):
-        self.sales_data.append(transaction)
-        self.pos_logs.append({
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "transaction": transaction
-        })
-        self.log_to_cpa_chain(f"POS Sale Recorded: {transaction}")
-        self.witness_mesh_sign("POS Sale Signed") 
+        self.log_to_cpa_chain(f"Retail Runtimes Detected: {active_runtimes}")
+        self.witness_mesh_sign("Runtime Detection Signed")
+        return active_runtimes
 
-    def daily_sales_sync(self):
-        self.log_to_cpa_chain(f"Daily Sales Sync: {len(self.sales_data)} transactions")
-        self.witness_mesh_sign("Daily Sync Signed")
-        self.sales_data.clear() 
+    def verify_compliance(self):
+        """Checks if the node is compliant with central security policy."""
+        if not self.compliance_status:
+            self.log_to_cpa_chain("Retail Compliance Violation! Node Locked.")
+            self.witness_mesh_sign("Compliance Lockdown Signed")
+            self.lock_node()
+        else:
+            self.log_to_cpa_chain("Retail Compliance Verified")
+            self.witness_mesh_sign("Compliance OK Signed")
 
-    def check_reorder_trigger(self, predictive_demand):
-        stock_level = random.randint(50, 150)  # Placeholder
-        self.log_to_cpa_chain(f"Current Stock Level: {stock_level} vs Predicted Demand: {predictive_demand}")
-        if stock_level < predictive_demand:
-            reorder_qty = predictive_demand - stock_level
-            self.reorder_flags.append({
-                "timestamp": datetime.datetime.utcnow().isoformat(),
-                "needed": reorder_qty
-            })
-            self.log_to_cpa_chain(f"Reorder Triggered for {reorder_qty} units")
-            self.witness_mesh_sign("Reorder Flag Signed") 
+    def lock_node(self):
+        """Disables the node in case of a compliance breach."""
+        print("!!! RETAIL NODE LOCKED DOWN !!!")
+        self.log_to_cpa_chain("Retail Node Disabled Due to Compliance Breach")
+        self.witness_mesh_sign("Node Lockdown Signed")
 
-    def offline_cache_transaction(self, transaction):
-        self.offline_cache.append(transaction)
-        self.log_to_cpa_chain(f"Transaction Cached Offline: {transaction}") 
+    def record_pos_sale(self, transaction: Dict[str, Any]):
+        """Records a successful POS transaction and logs it."""
+        self.sales_data.append(transaction)
+        self.pos_logs.append({
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "transaction": transaction
+        })
+        self.log_to_cpa_chain(f"POS Sale Recorded: {transaction.get('sku', 'Unknown SKU')}")
+        self.witness_mesh_sign("POS Sale Signed")
 
-    def push_offline_cache(self):
-        if self.offline_cache:
-            self.sales_data.extend(self.offline_cache)
-            self.log_to_cpa_chain(f"Pushing {len(self.offline_cache)} Offline Transactions")
-            self.offline_cache.clear()
-            self.daily_sales_sync() 
+    def daily_sales_sync(self):
+        """Simulates synchronizing all recorded sales data to the central network."""
+        count = len(self.sales_data)
+        self.log_to_cpa_chain(f"Daily Sales Sync: {count} transactions processed")
+        self.witness_mesh_sign("Daily Sync Signed")
+        self.sales_data.clear() # Clear data after successful sync
+
+    def check_reorder_trigger(self, predictive_demand: int):
+        """Checks inventory levels against predictive demand to trigger a reorder."""
+        stock_level = random.randint(50, 150)  # Placeholder for real inventory API call
+        
+        self.log_to_cpa_chain(f"Current Stock Level: {stock_level} vs Predicted Demand: {predictive_demand}")
+        
+        if stock_level < predictive_demand:
+            reorder_qty = predictive_demand - stock_level
+            self.reorder_flags.append({
+                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "needed": reorder_qty
+            })
+            self.log_to_cpa_chain(f"Reorder Triggered for {reorder_qty} units (Stock: {stock_level})")
+            self.witness_mesh_sign("Reorder Flag Signed")
+
+    def offline_cache_transaction(self, transaction: Dict[str, Any]):
+        """Caches a transaction for later push if the central network is unavailable."""
+        self.offline_cache.append(transaction)
+        self.log_to_cpa_chain(f"Transaction Cached Offline: {transaction.get('sku', 'Unknown SKU')}")
+
+    def push_offline_cache(self):
+        """Pushes cached offline transactions to sales data when network connectivity is restored."""
+        if self.offline_cache:
+            count = len(self.offline_cache)
+            self.sales_data.extend(self.offline_cache)
+            self.log_to_cpa_chain(f"Pushing {count} Offline Transactions to Sales Queue")
+            self.offline_cache.clear()
+            self.daily_sales_sync() # Sync immediately after push
+        else:
+            self.log_to_cpa_chain("No Offline Cache to Push.")
 
 if __name__ == "__main__":
-    # === DEMO === 
+    # === DEMO EXECUTION ===
+    print("--- Initializing Project Yggdrasil Retail Node V2 ---")
+    retail = RetailNode()
+    print("-" * 40)
 
-    retail = RetailNode() 
+    # Display detected runtimes
+    print(f"Detected Runtimes: {retail.runtimes}")
+    print(f"OS Name: {retail.os_name}")
+    print("-" * 40)
 
-    # OS/Runtime detection happens on init 
+    # 1. Simulate POS sale
+    retail.record_pos_sale({"id": "T001", "sku": "ABC123", "qty": 2, "amount": 40.00})
 
-    # Simulate POS sale
-    retail.record_pos_sale({"sku": "ABC123", "qty": 2, "amount": 40.00}) 
+    # 2. Predictive check (simulated low stock)
+    retail.check_reorder_trigger(predictive_demand=120)
 
-    # Predictive check
-    retail.check_reorder_trigger(predictive_demand=120) 
+    # 3. Compliance check pass
+    retail.verify_compliance()
 
-    # Compliance check pass
-    retail.verify_compliance() 
+    # 4. Simulate Offline -> Cache -> Push scenario
+    print("\n--- SIMULATING OFFLINE CACHE AND PUSH ---")
+    retail.offline_cache_transaction({"id": "T002", "sku": "XYZ789", "qty": 1, "amount": 15.00})
+    retail.offline_cache_transaction({"id": "T003", "sku": "DEF456", "qty": 5, "amount": 25.50})
+    
+    retail.push_offline_cache() # This will trigger a sync
 
-    # Offline scenario
-    retail.offline_cache_transaction({"sku": "XYZ789", "qty": 1, "amount": 15.00})
-    retail.push_offline_cache() 
-
-    # Daily sync
-    retail.daily_sales_sync()
+    # 5. Simulate a compliance failure
+    print("\n--- SIMULATING COMPLIANCE FAILURE ---")
+    retail.compliance_status = False 
+    retail.verify_compliance()
+    
+    print("-" * 40)
+    print("DEMO ENDED.")
