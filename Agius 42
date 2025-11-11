@@ -1,3 +1,280 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
+from enum import Enum, auto
+from typing import Any, Dict, List, Tuple
+
+# ---------------------------
+# Logger setup
+# ---------------------------
+logger = logging.getLogger("Aegis42SecurityNode")
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | AEGIS-42 | %(levelname)s | %(message)s",
+    )
+
+
+# ---------------------------
+# Enums & Exceptions
+# ---------------------------
+class Severity(Enum):
+    LOW = auto()
+    MEDIUM = auto()
+    HIGH = auto()
+    CRITICAL = auto()
+
+
+class SecurityMode(Enum):
+    NORMAL = "Normal"
+    ELEVATED = "Elevated"
+    LOCKDOWN = "Lockdown"
+
+
+class SecurityNodeError(Exception):
+    """Raised for invalid operations in the security node."""
+    pass
+
+
+# ---------------------------
+# Data Structures
+# ---------------------------
+@dataclass
+class EventEntry:
+    timestamp: datetime
+    message: str
+
+
+@dataclass
+class ThreatEntry:
+    timestamp: datetime
+    source: str
+    description: str
+    severity: Severity
+    # Optional numeric score for later analytics
+    score: int = field(default=0)
+
+
+# ---------------------------
+# Core Security Node
+# ---------------------------
+class SecurityNode:
+    """
+    Aegis-42 core security node.
+
+    Tracks events, threats, firewall posture, and security mode.
+    This is intended as the baseline for a larger Aegis-42/Watchtower stack.
+    """
+
+    SEVERITY_SCORES: Dict[Severity, int] = {
+        Severity.LOW: 1,
+        Severity.MEDIUM: 5,
+        Severity.HIGH: 15,
+        Severity.CRITICAL: 30,
+    }
+
+    def __init__(self, node_id: str = "aegis-42-core", max_firewall_layers: int = 42) -> None:
+        self.node_id: str = node_id
+        self.max_firewall_layers: int = max_firewall_layers
+
+        self.event_log: List[EventEntry] = []
+        self.threat_log: List[ThreatEntry] = []
+        self.system_status: Dict[str, str] = {}
+
+        self.firewall_layer: int = 0
+        self.security_mode: SecurityMode = SecurityMode.NORMAL
+        self.cumulative_threat_score: int = 0
+
+        self._log_event("Security Node initialized.")
+        self._update_system_status(
+            "Firewall",
+            f"Inactive (Layer {self.firewall_layer}/{self.max_firewall_layers})",
+        )
+
+    # ---------------------------
+    # Internal helpers
+    # ---------------------------
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _log_event(self, message: str) -> None:
+        entry = EventEntry(timestamp=self._utc_now(), message=message)
+        self.event_log.append(entry)
+        logger.info(f"[EVENT] {message}")
+
+    def _update_system_status(self, component: str, status: str) -> None:
+        old_status = self.system_status.get(component, "Unknown")
+        self.system_status[component] = status
+        self._log_event(
+            f"{component} status changed from '{old_status}' to '{status}'"
+        )
+
+    def _normalize_severity(self, severity: str | Severity) -> Severity:
+        if isinstance(severity, Severity):
+            return severity
+
+        normalized = severity.strip().upper()
+        mapping = {
+            "LOW": Severity.LOW,
+            "MEDIUM": Severity.MEDIUM,
+            "HIGH": Severity.HIGH,
+            "CRITICAL": Severity.CRITICAL,
+        }
+        if normalized not in mapping:
+            raise SecurityNodeError(f"Invalid severity: {severity}")
+        return mapping[normalized]
+
+    def _log_threat_internal(
+        self, source: str, description: str, severity: Severity
+    ) -> ThreatEntry:
+        score = self.SEVERITY_SCORES[severity]
+        entry = ThreatEntry(
+            timestamp=self._utc_now(),
+            source=source,
+            description=description,
+            severity=severity,
+            score=score,
+        )
+        self.threat_log.append(entry)
+        self.cumulative_threat_score += score
+
+        logger.warning(
+            f"[THREAT] source={source} | severity={severity.name} | score={score} | {description}"
+        )
+        return entry
+
+    def _auto_adjust_posture(self, severity: Severity) -> None:
+        """
+        Simple posture logic:
+        - HIGH     -> at least ELEVATED
+        - CRITICAL -> LOCKDOWN
+        """
+        if severity == Severity.CRITICAL:
+            if self.security_mode != SecurityMode.LOCKDOWN:
+                self.switch_security_mode(SecurityMode.LOCKDOWN)
+        elif severity == Severity.HIGH:
+            if self.security_mode == SecurityMode.NORMAL:
+                self.switch_security_mode(SecurityMode.ELEVATED)
+
+    # ---------------------------
+    # Public API
+    # ---------------------------
+    def update_component_status(self, component: str, status: str) -> None:
+        """Public wrapper to update system component status."""
+        self._update_system_status(component, status)
+
+    def advance_firewall(self, steps: int = 1) -> None:
+        """
+        Advance firewall posture by N layers.
+        Raises if exceeding max_firewall_layers.
+        """
+        if steps <= 0:
+            raise SecurityNodeError("Firewall advance steps must be positive.")
+
+        new_layer = self.firewall_layer + steps
+        if new_layer > self.max_firewall_layers:
+            raise SecurityNodeError(
+                f"Firewall is at maximum layer ({self.max_firewall_layers})."
+            )
+
+        self.firewall_layer = new_layer
+        difficulty = round(self.firewall_layer * 3.0, 2)
+        self._update_system_status(
+            "Firewall",
+            f"Active (Layer {self.firewall_layer}/{self.max_firewall_layers}, "
+            f"Difficulty: {difficulty})",
+        )
+
+    def switch_security_mode(self, mode: SecurityMode | str) -> None:
+        """Switch overall security mode with validation and logging."""
+
+        if isinstance(mode, str):
+            normalized = mode.strip().capitalize()
+            mapping = {
+                "Normal": SecurityMode.NORMAL,
+                "Elevated": SecurityMode.ELEVATED,
+                "Lockdown": SecurityMode.LOCKDOWN,
+            }
+            if normalized not in mapping:
+                raise SecurityNodeError(f"Invalid security mode: {mode}")
+            mode_enum = mapping[normalized]
+        else:
+            mode_enum = mode
+
+        old_mode = self.security_mode
+        self.security_mode = mode_enum
+        self._log_event(f"Security mode changed from {old_mode.value} to {mode_enum.value}")
+
+    def log_threat(self, source: str, description: str, severity: str | Severity) -> None:
+        """
+        Public method to log a threat and auto-adjust posture.
+        """
+        sev_enum = self._normalize_severity(severity)
+        self._log_threat_internal(source, description, sev_enum)
+        self._auto_adjust_posture(sev_enum)
+
+    def get_summary(self) -> Dict[str, Any]:
+        """High-level summary for dashboards / quick status checks."""
+        return {
+            "node_id": self.node_id,
+            "total_events": len(self.event_log),
+            "total_threats": len(self.threat_log),
+            "firewall_layer": self.firewall_layer,
+            "max_firewall_layers": self.max_firewall_layers,
+            "security_mode": self.security_mode.value,
+            "cumulative_threat_score": self.cumulative_threat_score,
+            "system_components": len(self.system_status),
+        }
+
+    def get_logs(self) -> Dict[str, Any]:
+        """Return logs as JSON-serializable structures."""
+        return {
+            "event_log": [
+                {
+                    "timestamp": e.timestamp.isoformat(),
+                    "message": e.message,
+                }
+                for e in self.event_log
+            ],
+            "threat_log": [
+                {
+                    "timestamp": t.timestamp.isoformat(),
+                    "source": t.source,
+                    "description": t.description,
+                    "severity": t.severity.name,
+                    "score": t.score,
+                }
+                for t in self.threat_log
+            ],
+            "system_status": self.system_status.copy(),
+        }
+
+
+# ---------------------------
+# Example usage / quick self-test
+# ---------------------------
+if __name__ == "__main__":
+    node = SecurityNode()
+
+    node.update_component_status("IDS", "Monitoring")
+    node.update_component_status("SIEM", "Online")
+
+    node.log_threat("192.168.0.5", "Port scan detected", "Medium")
+    node.log_threat("203.0.113.15", "DDoS signatures identified", "Critical")
+
+    for _ in range(5):
+        node.advance_firewall()
+
+    print("SUMMARY:")
+    print(node.get_summary())
+
+    print("\nLOG EXPORT:")
+    print(node.get_logs())
+
+
 # Aegis42_watchtower.py
 from __future__ import annotations
 import hashlib
