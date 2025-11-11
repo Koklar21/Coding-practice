@@ -1,368 +1,283 @@
+# Aegis42_watchtower.py
 from __future__ import annotations
-
-import datetime
+import hashlib
+import hmac
+import json
 import logging
+import threading
 import time
-import random
-from typing import Any, Dict, List, Tuple
+from dataclasses import dataclass, asdict, field
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-SYSTEM_ID = "AEGIS-42-NODE-01"
+# optional: lightweight sklearn import for batch anomaly detector upgrade
+try:
+    from sklearn.ensemble import IsolationForest  # type: ignore
+    SKLEARN_AVAILABLE = True
+except Exception:
+    SKLEARN_AVAILABLE = False
 
-# --- Logging (structured, ISO timestamps) ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(module)-10s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+logger = logging.getLogger("Aegis42Watchtower")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | AEGIS-42 | %(levelname)s | %(message)s")
 
+# ---------------------------
+# CPA chaining helper (tamper-evident)
+# ---------------------------
+def hash_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
 
-class SecurityNodeError(Exception):
-    """Base exception for all security node operational failures."""
+@dataclass
+class CPAEntry:
+    timestamp: str
+    payload: Dict[str, Any]
+    prev_hash: Optional[str]
+    entry_hash: str
 
+def cpa_chain_entry(payload: Dict[str, Any], prev_hash: Optional[str]) -> CPAEntry:
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    ts = datetime.now(timezone.utc).isoformat()
+    raw = f"{ts}|{payload_json}|{prev_hash}".encode("utf-8")
+    entry_hash = hash_bytes(raw)
+    return CPAEntry(timestamp=ts, payload=payload, prev_hash=prev_hash, entry_hash=entry_hash)
 
-class OperationalConstraintError(SecurityNodeError):
-    """Raised when an operation violates system constraints (e.g., max layers)."""
-
-
-class SecurityNode:
-    """
-    The Aegis-42 Multilayer Defensive Scaffolding.
-
-    Features:
-      - Watchtower scan hooks
-      - Self-repair trigger logic
-      - PsyOp (Theseus Protocol) with cognitive stress injection
-
-    Notes:
-      - This class focuses on orchestration and simulation. Plug real sensors
-        and watchtowers via your ingestion layer.
-    """
-
-    VALID_SEVERITIES: set[str] = {"Low", "Medium", "High", "Critical", "PsyOp"}
-    MAX_FIREWALL_LAYERS: int = 42
-
-    def __init__(self) -> None:
-        # Persistent logs
-        self.event_log: List[Tuple[datetime.datetime, str]] = []
-        self.threat_log: List[Dict[str, Any]] = []
-        self.system_status: Dict[str, str] = {}
-
-        # Defensive state
-        self.firewall_layer: int = 0
-        self.security_mode: str = "Normal"
-        self.deception_active: bool = False
-
-        # Theseus Protocol state
-        self.theseus_state: Dict[str, bool] = {
-            "Core_Data_Locus": False,
-            "Auth_Service_ID": False,
-            "Firewall_Signature_Morph": False,
-        }
-        self.cognitive_load_index: int = 0
-
-        # Bootstrap status
-        self._log_event(f"[{SYSTEM_ID}] Operational Startup Sequence Initiated.")
-        self._update_system_status(
-            "Firewall", f"Inactive (Layer {self.firewall_layer}/{self.MAX_FIREWALL_LAYERS})"
-        )
-        self._update_system_status("PsyOp_Module", "Dormant (Theseus Protocol Offline)")
-        self._update_system_status("Watchtower", "Standby")
-
-    # ----------------- Logging helpers -----------------
-
-    def _log_event(self, message: str, module: str = "SYSTEM") -> None:
-        ts = datetime.datetime.utcnow()
-        self.event_log.append((ts, message))
-        logging.info(f"[{module}] {message}")
-
-    def _log_threat(
-        self, source: str, description: str, severity: str, module: str = "THREAT_INT"
-    ) -> None:
-        if severity not in self.VALID_SEVERITIES:
-            raise SecurityNodeError(f"Invalid severity level: {severity}")
-
-        entry = {
-            "timestamp": datetime.datetime.utcnow(),
-            "source": source,
-            "description": description,
-            "severity": severity,
-            "module": module,
-        }
-        self.threat_log.append(entry)
-
-        if severity == "PsyOp":
-            logging.debug(f"[{module}] DECEPTION LOG: {source} | {description}")
-        elif severity in {"High", "Critical"}:
-            logging.critical(f"[{module}] ALERT! {source} | {severity} | {description}")
-        else:
-            logging.warning(f"[{module}] {source} | {severity} | {description}")
-
-    def _update_system_status(self, component: str, status: str) -> None:
-        old = self.system_status.get(component, "Unknown")
-        self.system_status[component] = status
-        self._log_event(
-            f"{component} status changed from '{old}' to '{status}'", module="STATUS_REG"
-        )
-
-    # ----------------- Core defensive ops -----------------
-
-    def advance_firewall(self) -> None:
-        """Engage one additional defensive layer."""
-        if self.firewall_layer >= self.MAX_FIREWALL_LAYERS:
-            raise OperationalConstraintError(
-                f"Firewall is at maximum Layer {self.MAX_FIREWALL_LAYERS}. Deployment complete."
-            )
-
-        self.firewall_layer += 1
-        c2 = round((self.firewall_layer ** 1.5) * 0.42, 2)
-        self._update_system_status(
-            "Firewall",
-            f"Active (Layer {self.firewall_layer}/{self.MAX_FIREWALL_LAYERS}, C² Metric: {c2})",
-        )
-        self._log_event(f"Layer {self.firewall_layer} deployed. C² Rating: {c2}", module="FIREWALL")
-
-    def _ensure_min_firewall(self, minimum: int) -> int:
+# ---------------------------
+# Watchtower: ingest, store CPA chain, basic rules
+# ---------------------------
+class Watchtower:
+    def __init__(self, signing_key: bytes):
         """
-        Ensure firewall has at least 'minimum' layers.
-        Returns number of layers deployed during the operation.
+        signing_key: HMAC key for local attestation of CPA roots.
+        In production this should be HSM-backed; here it's a minimal placeholder.
         """
-        if minimum < 0:
-            minimum = 0
-        if minimum > self.MAX_FIREWALL_LAYERS:
-            minimum = self.MAX_FIREWALL_LAYERS
+        self.signing_key = signing_key
+        self.chain: List[CPAEntry] = []
+        self.index_by_source: Dict[str, List[str]] = {}
+        self.lock = threading.RLock()
+        self.rules: List[Callable[[CPAEntry], Optional[Dict[str, Any]]]] = []
+        self.alert_handlers: List[Callable[[Dict[str, Any]], None]] = []
+        self.av_hook: Optional[AVHook] = None
 
-        deployed = 0
-        while self.firewall_layer < minimum:
-            self.advance_firewall()
-            deployed += 1
-        return deployed
+    def attest_root(self) -> Dict[str, str]:
+        """Return signed root hash for external anchoring."""
+        with self.lock:
+            root = self.chain[-1].entry_hash if self.chain else ""
+            sig = hmac.new(self.signing_key, root.encode("utf-8"), hashlib.sha256).hexdigest()
+            return {"root": root, "sig": sig, "timestamp": datetime.now(timezone.utc).isoformat()}
 
-    def switch_security_mode(self, mode: str) -> None:
-        valid = {"Normal", "Elevated", "Lockdown"}
-        if mode not in valid:
-            raise SecurityNodeError(f"Invalid operational mode: {mode}")
+    def ingest(self, payload: Dict[str, Any]) -> CPAEntry:
+        """Ingest a structured payload, append to CPA chain, evaluate rules."""
+        with self.lock:
+            prev = self.chain[-1].entry_hash if self.chain else None
+            entry = cpa_chain_entry(payload, prev)
+            self.chain.append(entry)
+            src = payload.get("source")
+            if src:
+                self.index_by_source.setdefault(src, []).append(entry.entry_hash)
+            logger.info(f"Watchtower ingest: src={src} type={payload.get('type')}")
+        # evaluate rules outside lock to avoid deadlocks
+        for rule in self.rules:
+            try:
+                alert = rule(entry)
+                if alert:
+                    self._handle_alert(alert)
+            except Exception as e:
+                logger.exception("Rule evaluation error: %s", e)
+        return entry
 
-        if mode == self.security_mode:
-            return
+    def register_rule(self, rule_fn: Callable[[CPAEntry], Optional[Dict[str, Any]]]) -> None:
+        """Register a rule that returns an alert dict or None."""
+        self.rules.append(rule_fn)
 
-        prev = self.security_mode
-        self.security_mode = mode
-        self._log_event(f"Operational Stance escalated: '{prev}' -> '{mode}'", module="MODE_CHANGE")
+    def register_alert_handler(self, handler_fn: Callable[[Dict[str, Any]], None]) -> None:
+        self.alert_handlers.append(handler_fn)
 
-        if mode == "Lockdown":
-            # Lockdown disables deception and stabilizes logging for forensics.
-            self.disable_psyop_defense("Lockdown: Forensics Integrity Assurance")
+    def _handle_alert(self, alert: Dict[str, Any]) -> None:
+        logger.warning(f"ALERT: {alert}")
+        for h in self.alert_handlers:
+            try:
+                h(alert)
+            except Exception:
+                logger.exception("Alert handler failed")
 
-    def log_threat(self, source: str, description: str, severity: str) -> None:
-        self._log_threat(source, description, severity)
+    def attach_av_hook(self, av_hook: "AVHook") -> None:
+        self.av_hook = av_hook
+        logger.info("AV hook attached to Watchtower.")
 
-        if severity == "Critical":
-            self.switch_security_mode("Lockdown")
-            self.watchtower_scan(level="Full_Response")
-        elif severity == "High" and not self.deception_active:
-            self.switch_security_mode("Elevated")
-            self.deploy_psyop_defense(f"Active probe detected from {source}")
-        else:
-            self.watchtower_scan(level="Passive_Scan")
+# ---------------------------
+# AV / Threat Intel Hook interface
+# ---------------------------
+class AVHook:
+    """
+    Minimal interface for AV / threat intel providers.
+    Implementers should fetch indicators, signature updates, and provide lookup methods.
+    """
+    def __init__(self):
+        self.indicators = set()  # example: IPs, hashes, domains
 
-    # ----------------- Self-repair + watchtower orchestration -----------------
+    def update_from_provider(self, batch: List[str]) -> None:
+        """Bulk update indicators (hashes, ips, domains)."""
+        self.indicators.update(batch)
 
-    def _execute_self_repair(self, target: str, action: str) -> None:
-        self._log_event(
-            f"Initiating self-repair sequence. Target: {target}. Action: {action}", module="SELF_REPAIR"
-        )
+    def is_indicator(self, value: str) -> bool:
+        return value in self.indicators
 
-        if target == "FIREWALL_UNDERDEPLOYED":
-            deployed = self._ensure_min_firewall(5)
-            self._log_event(
-                f"Firewall auto-deployed {deployed} layer(s) to reach minimum operational level.",
-                module="SELF_REPAIR",
-            )
+# ---------------------------
+# Simple online learner (z-score) + optional batch IsolationForest
+# ---------------------------
+class OnlineAnomalyDetector:
+    """
+    Lightweight streaming learner:
+      - Keeps running mean/variance per numeric feature and computes z-score.
+      - Optionally accept batch feature vectors and use sklearn IsolationForest when available.
+    """
 
-        elif target == "SYSTEM_INTEGRITY":
-            if self.system_status.get("Watchtower") != "Monitoring":
-                self._update_system_status("Watchtower", "Monitoring")
-            self._log_event("System integrity restored. Core services validated.", module="SELF_REPAIR")
+    def __init__(self, zscore_threshold: float = 4.0):
+        self.count = 0
+        self.mean = 0.0
+        self.M2 = 0.0
+        self.zscore_threshold = zscore_threshold
+        self.buffer: List[List[float]] = []
+        self.if_model = None
+        if SKLEARN_AVAILABLE:
+            self.if_model = IsolationForest(n_estimators=64, contamination=0.01, random_state=42)
 
-    def watchtower_scan(self, level: str = "Standard_Scan") -> None:
-        self._update_system_status("Watchtower", f"Scanning ({level})...")
+    def update_stream(self, value: float) -> Optional[Dict[str, Any]]:
+        # Welford's online mean/variance
+        self.count += 1
+        delta = value - self.mean
+        self.mean += delta / self.count
+        delta2 = value - self.mean
+        self.M2 += delta * delta2
+        if self.count < 2:
+            return None
+        variance = self.M2 / (self.count - 1)
+        std = variance ** 0.5 if variance > 0 else 0.0
+        z = abs((value - self.mean) / std) if std > 0 else 0.0
+        if z > self.zscore_threshold:
+            return {"type": "anomaly", "value": value, "zscore": z, "mean": self.mean, "std": std}
+        return None
 
-        # Trigger repair if mode is elevated/lockdown but firewall < L5
-        if self.security_mode != "Normal" and self.firewall_layer < 5:
-            self._log_event(
-                "INTEGRITY VIOLATION: Firewall under-deployed for current security mode. Initiating repair.",
-                module="WATCHTOWER",
-            )
-            self._execute_self_repair("FIREWALL_UNDERDEPLOYED", "Auto-deploy to Layer 5")
+    def add_batch_feature_vector(self, vec: List[float]) -> None:
+        self.buffer.append(vec)
+        if len(self.buffer) >= 256 and self.if_model:
+            # train/update model in background thread
+            try:
+                self.if_model.fit(self.buffer)
+                self.buffer.clear()
+                logger.info("IsolationForest trained on batch.")
+            except Exception:
+                logger.exception("Batch training failed.")
 
-        # PsyOp noise injection while deception is active
-        if self.deception_active:
-            self._inject_cognitive_stress(random.randint(5, 15))
+    def predict_if_anomalous(self, vec: List[float]) -> bool:
+        if self.if_model:
+            pred = self.if_model.predict([vec])[0]  # returns 1 or -1
+            return pred == -1
+        return False
 
-        self._update_system_status("Watchtower", f"Complete ({level}). Mode: {self.security_mode}")
+# ---------------------------
+# Self-Repair Agent (safe, auditable actions)
+# ---------------------------
+@dataclass
+class RepairAction:
+    id: str
+    name: str
+    params: Dict[str, Any]
+    timestamp: str
+    status: str = "PENDING"
+    actor: Optional[str] = None  # system or username who approved/sent action
 
-    # ----------------- PsyOp / Theseus Protocol -----------------
+class SelfRepairAgent:
+    """
+    Register remediation handlers, request/authorize actions, execute with audit.
+    Destructive actions MUST be multi-signer in production.
+    """
+    def __init__(self):
+        self.handlers: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
+        self.action_log: List[RepairAction] = []
+        self.lock = threading.RLock()
 
-    def deploy_psyop_defense(self, trigger_message: str) -> None:
-        if self.deception_active:
-            self._log_event(
-                "PsyOp module already active. Cycling identity morph; refreshing stress.",
-                module="PSYOP_MGR",
-            )
-            self._morph_theseus_state()
-            self._inject_cognitive_stress(20)
-            return
+    def register_handler(self, action_name: str, fn: Callable[[Dict[str, Any]], Dict[str, Any]]) -> None:
+        self.handlers[action_name] = fn
+        logger.info("Repair handler registered: %s", action_name)
 
-        self.deception_active = True
-        self.cognitive_load_index = 50
-        self._morph_theseus_state(initial=True)
-        self._update_system_status("PsyOp_Module", "ACTIVE - Theseus Protocol Engaged")
+    def request_action(self, action_name: str, params: Dict[str, Any], actor: Optional[str] = "system") -> RepairAction:
+        if action_name not in self.handlers:
+            raise RuntimeError("Unknown repair action")
+        ra = RepairAction(id=hashlib.sha1((action_name + str(time.time())).encode()).hexdigest(),
+                          name=action_name, params=params, timestamp=datetime.now(timezone.utc).isoformat(),
+                          actor=actor)
+        with self.lock:
+            self.action_log.append(ra)
+        # Execute synchronously for now (could be queued)
+        try:
+            ra.status = "EXECUTING"
+            ret = self.handlers[action_name](params)
+            ra.status = "SUCCESS"
+            logger.info("RepairAction success: %s -> %s", ra.name, ret)
+        except Exception as e:
+            ra.status = "FAILED"
+            logger.exception("RepairAction failed: %s", e)
+        return ra
 
-        decoy_ip = f"172.16.{random.randint(1, 254)}.{random.randint(1, 254)}"
-        self._log_threat(
-            source="Paradox_Lure",
-            description=(
-                f"SUCCESSFUL INFILTRATION: Adversary gained read access to Decoy Locus {decoy_ip}. "
-                f"Begin extraction (Status: 0% complete). Trigger: {trigger_message}"
-            ),
-            severity="PsyOp",
-            module="PSYOP_LURE",
-        )
-        self._log_event("Paradoxical confirmation lure deployed.", module="PSYOP_MGR")
+# ---------------------------
+# Example: tie all together
+# ---------------------------
+def example_setup():
+    # signing key should be HSM backed in prod
+    watch = Watchtower(signing_key=b"dev-temp-key-please-use-hsm")
+    av = AVHook()
+    # preload some indicators (in reality, sync from vendor feeds)
+    av.update_from_provider(["203.0.113.15", "baddomain.example", "deadbeefhash"])
+    watch.attach_av_hook(av)
 
-    def _morph_theseus_state(self, initial: bool = False) -> None:
-        for component in list(self.theseus_state.keys()):
-            flip = initial or (random.random() > 0.4)
-            if not flip:
-                continue
+    # anomaly detector
+    learner = OnlineAnomalyDetector(zscore_threshold=3.5)
 
-            self.theseus_state[component] = not self.theseus_state[component]
-            action = "REPLACED (Decoy)" if self.theseus_state[component] else "REVERTED (Original)"
-            self._log_event(f"THESEUS MORPH: {component} component {action}.", module="PSYOP_MORPH")
+    # Register a basic rule: flag CPA entries with source in AV indicators or large numeric anomalies
+    def rule_av_and_anomaly(entry: CPAEntry) -> Optional[Dict[str, Any]]:
+        payload = entry.payload
+        src = payload.get("source", "")
+        if watch.av_hook and watch.av_hook.is_indicator(src):
+            return {"type": "threat_intel_match", "reason": "Source in AV feed", "source": src, "entry": entry.entry_hash}
+        # if payload has numeric metric 'value' we stream to learner
+        val = payload.get("metrics", {}).get("value")
+        if isinstance(val, (int, float)):
+            a = learner.update_stream(float(val))
+            if a:
+                return {"type": "stat_anomaly", "details": a, "entry": entry.entry_hash}
+        return None
 
-            if self.theseus_state[component]:
-                self._log_threat(
-                    source="Status_Contradiction",
-                    description=(
-                        f"{component} reports successful read access to its OWN log data, "
-                        f"but system reports 'Not Found'."
-                    ),
-                    severity="PsyOp",
-                    module="PSYOP_MORPH",
-                )
+    watch.register_rule(rule_av_and_anomaly)
 
-    def _inject_cognitive_stress(self, magnitude: int) -> None:
-        magnitude = max(0, magnitude)
-        self.cognitive_load_index = min(100, self.cognitive_load_index + magnitude)
+    # register a simple repair agent (quarantine IP & block egress)
+    repair = SelfRepairAgent()
+    def quarantine_ip_handler(params: Dict[str, Any]) -> Dict[str, Any]:
+        ip = params.get("ip")
+        if not ip:
+            raise RuntimeError("missing ip")
+        # placeholder: call firewall API or orchestration system -> here we just log
+        logger.info("Quarantine request applied to IP: %s (simulated)", ip)
+        return {"quarantined": ip}
+    repair.register_handler("quarantine_ip", quarantine_ip_handler)
 
-        for _ in range(magnitude):
-            decoy_service = random.choice(["RPC_Server_1", "DB_Mirror_4", "Telemetry_Sink_A"])
-            decoy_ip = f"10.0.0.{random.randint(1, 254)}"
-            msg = random.choice(
-                [
-                    f"[{decoy_service}] Fatal error accessing non-existent file path: "
-                    f"/usr/local/temp/0x{random.getrandbits(12):x}.log",
-                    f"[{decoy_ip}] TCP handshake successful, checksum failed on port {random.randint(40000, 60000)}.",
-                    f"Watchdog detected 5s heartbeat delay on system {random.choice(['A', 'B', 'C'])}, autocorrected.",
-                    f"Authentication attempt successful (User: ghost_{random.randint(100, 999)}), source IP unlogged.",
-                ]
-            )
-            self._log_threat("Cognitive_Load", msg, "Low", module="STRESS_ENGINE")
+    # attach alert handler to auto-request remediation for threat_intel_match
+    def alert_to_repair(alert: Dict[str, Any]) -> None:
+        if alert.get("type") == "threat_intel_match":
+            src = alert.get("source")
+            # safe default: request quarantine, actor is 'auto-system'
+            repair.request_action("quarantine_ip", {"ip": src}, actor="auto-system")
 
-        self._update_system_status("Cognitive_Stress_Index", f"{self.cognitive_load_index}%")
-        self._log_event(
-            f"Injected {magnitude} data points. Stress Index now {self.cognitive_load_index}%.",
-            module="STRESS_ENGINE",
-        )
+    watch.register_alert_handler(alert_to_repair)
 
-    def disable_psyop_defense(self, reason: str) -> None:
-        if not self.deception_active:
-            self._log_event("PsyOp module already dormant. No action taken.", module="PSYOP_MGR")
-            return
+    # ingest several events
+    watch.ingest({"type": "network", "source": "192.0.2.1", "metrics": {"value": 1}})
+    watch.ingest({"type": "network", "source": "203.0.113.15", "metrics": {"value": 9.0}})
+    watch.ingest({"type": "syslog", "source": "192.168.0.5", "metrics": {"value": 6.3}})
 
-        self.deception_active = False
-        self.cognitive_load_index = 0
-        for component in self.theseus_state:
-            self.theseus_state[component] = False
-
-        self._update_system_status("PsyOp_Module", "Dormant (Theseus Protocol Offline)")
-        self._update_system_status("Cognitive_Stress_Index", "0% (Stabilized)")
-        self._log_event(f"PsyOp Module deactivated and identities stabilized. Reason: {reason}", module="PSYOP_MGR")
-
-    # ----------------- Reporting -----------------
-
-    def get_summary(self) -> Dict[str, Any]:
-        return {
-            "System_ID": SYSTEM_ID,
-            "Total_Events": len(self.event_log),
-            "Total_Threats": len(self.threat_log),
-            "Firewall_Layer": f"{self.firewall_layer}/{self.MAX_FIREWALL_LAYERS}",
-            "Security_Mode": self.security_mode,
-            "PsyOp_Active": self.deception_active,
-            "Cognitive_Load_Index": f"{self.cognitive_load_index}%",
-            "Theseus_State": dict(self.theseus_state),
-            "Status_Components": list(self.system_status.keys()),
-        }
-
-    def get_logs(self) -> Dict[str, Any]:
-        return {
-            "Event_Log": [(ts.isoformat(), msg) for ts, msg in self.event_log],
-            "Threat_Log": [{**e, "timestamp": e["timestamp"].isoformat()} for e in self.threat_log],
-            "System_Status_Register": dict(self.system_status),
-        }
-
+    print("Attestation:", watch.attest_root())
+    print("Chain length:", len(watch.chain))
+    return watch, learner, repair
 
 if __name__ == "__main__":
-    # Scenario demo
-    print("\n--- AEGIS-42: SCENARIO INITIATION (Deep PsyOp Test) ---\n")
-    node = SecurityNode()
-
-    # Under-deploy to trigger self-repair later
-    for _ in range(3):
-        node.advance_firewall()
-
-    print("\n--- STAGE 1: HIGH-LEVEL THREAT & PSYOP DEPLOYMENT ---")
-    node.log_threat("203.0.113.15", "Stealthy credential stuffing against exposed API.", "High")
-
-    print(f"\n[Pre-Scan Check] Firewall Layer: {node.firewall_layer}, Mode: {node.security_mode}")
-
-    print("\n--- STAGE 2: WATCHTOWER RUNS & EXECUTES SELF-REPAIR (Auto-deploy to L5) ---")
-    node.watchtower_scan()
-
-    for i in range(2):
-        time.sleep(0.01)
-        node.watchtower_scan()
-        if i == 0:
-            node._log_threat(
-                source="Adversary_Action",
-                description=(
-                    "Malware signature successfully deployed to FireWall_Signature_Morph Locus. Reporting 100% success."
-                ),
-                severity="High",
-                module="ADVERSARY_SIM",
-            )
-            node._log_threat(
-                source="System_Integrity_Check",
-                description="FireWall_Signature_Morph integrity check passed. No anomalies detected. Reporting 0% change.",
-                severity="PsyOp",
-                module="PSYOP_COUNTER",
-            )
-
-    print("\n--- STAGE 3: CRITICAL THREAT & LOCKDOWN (Stabilization) ---")
-    node.log_threat("198.51.100.33", "Brute-force attempt on core vault access key identified.", "Critical")
-
-    import json
-
-    print("\n--- FINAL TELEMETRY REPORT ---\n")
-    summary = node.get_summary()
-    print("SUMMARY:")
-    print(json.dumps(summary, indent=4))
-
-    print("\n--- FORENSIC LOG EXCERPT (PsyOp/Paradox) ---")
-    psyop_logs = [
-        t for t in node.get_logs()["Threat_Log"] if t["severity"] in ["PsyOp", "Low", "High"]
-    ]
-    for log in psyop_logs[-15:]:
-        print(f"[{log['timestamp'][:19]}] [{log['module']}] ({log['severity']}) -> {log['description']}")
-    print(f"\nFinal Cognitive Load Index: {summary['Cognitive_Load_Index']} (Should be 0% after Lockdown)")
-    print("\n--- SCENARIO END ---")
+    example_setup()
