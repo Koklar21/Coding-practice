@@ -1,560 +1,213 @@
-from __future__ import annotations
-
+import datetime
 import logging
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
-from enum import Enum, auto
-from typing import Any, Dict, List, Tuple
+import time
+import random
+import json
+import hashlib
+import threading
+from typing import Any, Dict, List, Optional, Callable
 
-# ---------------------------
-# Logger setup
-# ---------------------------
-logger = logging.getLogger("Aegis42SecurityNode")
-if not logger.handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | AEGIS-42 | %(levelname)s | %(message)s",
-    )
+# --- Initialization and Configuration ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(module)-15s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+SYSTEM_ID = "AEGIS-42-NODE-01"
 
+# ============================================================
+#                    OVERSIGHT ENGINE
+# ============================================================
 
-# ---------------------------
-# Enums & Exceptions
-# ---------------------------
-class Severity(Enum):
-    LOW = auto()
-    MEDIUM = auto()
-    HIGH = auto()
-    CRITICAL = auto()
-
-
-class SecurityMode(Enum):
-    NORMAL = "Normal"
-    ELEVATED = "Elevated"
-    LOCKDOWN = "Lockdown"
-
-
-class SecurityNodeError(Exception):
-    """Raised for invalid operations in the security node."""
-    pass
-
-
-# ---------------------------
-# Data Structures
-# ---------------------------
-@dataclass
-class EventEntry:
-    timestamp: datetime
-    message: str
-
-
-@dataclass
-class ThreatEntry:
-    timestamp: datetime
-    source: str
-    description: str
-    severity: Severity
-    # Optional numeric score for later analytics
-    score: int = field(default=0)
-
-
-# ---------------------------
-# Core Security Node
-# ---------------------------
-class SecurityNode:
+class OversightEngine:
     """
-    Aegis-42 core security node.
-
-    Tracks events, threats, firewall posture, and security mode.
-    This is intended as the baseline for a larger Aegis-42/Watchtower stack.
+    Manages the 'Time-Delayed Veto' workflow.
+    Executes actions automatically after a delay unless explicitly vetoed.
     """
+    def __init__(self, output_callback: Callable):
+        self.pending_actions: Dict[str, threading.Timer] = {}
+        self.lock = threading.RLock()
+        self.output_callback = output_callback 
 
-    SEVERITY_SCORES: Dict[Severity, int] = {
-        Severity.LOW: 1,
-        Severity.MEDIUM: 5,
-        Severity.HIGH: 15,
-        Severity.CRITICAL: 30,
-    }
+    def schedule_action(self, action_id: str, description: str, delay_seconds: int, payload: Callable):
+        with self.lock:
+            if action_id in self.pending_actions:
+                logging.warning(f"[OVERSIGHT] Action {action_id} already pending.")
+                return
 
-    def __init__(self, node_id: str = "aegis-42-core", max_firewall_layers: int = 42) -> None:
-        self.node_id: str = node_id
-        self.max_firewall_layers: int = max_firewall_layers
+            logging.info(f"[OVERSIGHT] [PENDING] Action: '{description}'. Executing in {delay_seconds}s unless VETOED.")
+            t = threading.Timer(delay_seconds, self._execute_wrapper, args=[action_id, description, payload])
+            self.pending_actions[action_id] = t
+            t.start()
 
-        self.event_log: List[EventEntry] = []
-        self.threat_log: List[ThreatEntry] = []
-        self.system_status: Dict[str, str] = {}
+    def _execute_wrapper(self, action_id: str, description: str, payload: Callable):
+        with self.lock:
+            if action_id in self.pending_actions:
+                logging.info(f"[OVERSIGHT] [TIMEOUT REACHED] Auto-Approving: {description}")
+                try:
+                    payload()
+                    self.output_callback(f"Action '{description}' EXECUTED successfully.")
+                except Exception as e:
+                    logging.error(f"[OVERSIGHT] Execution failed: {e}")
+                finally:
+                    if action_id in self.pending_actions:
+                        del self.pending_actions[action_id]
 
-        self.firewall_layer: int = 0
-        self.security_mode: SecurityMode = SecurityMode.NORMAL
-        self.cumulative_threat_score: int = 0
+    def veto_action(self, action_id: str, user_reason: str):
+        with self.lock:
+            if action_id in self.pending_actions:
+                timer = self.pending_actions[action_id]
+                timer.cancel()
+                del self.pending_actions[action_id]
+                logging.warning(f"[OVERSIGHT] [VETOED] Action: {action_id} aborted by operator. Reason: {user_reason}")
+                self.output_callback(f"Action {action_id} was aborted by operator.")
+            else:
+                logging.warning(f"[OVERSIGHT] Cannot veto {action_id}: Not found or already executed.")
 
-        self._log_event("Security Node initialized.")
-        self._update_system_status(
-            "Firewall",
-            f"Inactive (Layer {self.firewall_layer}/{self.max_firewall_layers})",
-        )
+# ============================================================
+#                    WATCHTOWER MODULES
+# ============================================================
 
-    # ---------------------------
-    # Internal helpers
-    # ---------------------------
-    @staticmethod
-    def _utc_now() -> datetime:
-        return datetime.now(timezone.utc)
+class WatchtowerConfig:
+    """Configuration container for a single surveillance module."""
+    def __init__(self, name: str, description: str, enabled: bool = True, sensitivity: float = 1.0):
+        self.name = name
+        self.description = description
+        self.enabled = enabled
+        self.sensitivity = sensitivity # 0.1 (Lazy) to 2.0 (Paranoid)
+        self.last_scan = None
 
-    def _log_event(self, message: str) -> None:
-        entry = EventEntry(timestamp=self._utc_now(), message=message)
-        self.event_log.append(entry)
-        logger.info(f"[EVENT] {message}")
+class WatchtowerManager:
+    """
+    Manages the 8 discrete surveillance modules.
+    Naming convention: Standard Enterprise IT (Sterile).
+    """
+    def __init__(self):
+        self.modules: Dict[str, WatchtowerConfig] = {}
+        self._initialize_standard_modules()
 
-    def _update_system_status(self, component: str, status: str) -> None:
-        old_status = self.system_status.get(component, "Unknown")
-        self.system_status[component] = status
-        self._log_event(
-            f"{component} status changed from '{old_status}' to '{status}'"
-        )
+    def _initialize_standard_modules(self):
+        # The "Corporate Sterile" 8
+        self.modules["WT_01_RES_MON"] = WatchtowerConfig("WT_01_RES_MON", "System Resource Allocation Monitor")
+        self.modules["WT_02_NET_ING"] = WatchtowerConfig("WT_02_NET_ING", "Network Ingress/Egress Traffic Analysis")
+        self.modules["WT_03_IAM_AUD"] = WatchtowerConfig("WT_03_IAM_AUD", "Identity Access Management Audit Logger")
+        self.modules["WT_04_INT_VER"] = WatchtowerConfig("WT_04_INT_VER", "File System Integrity Verification Service")
+        self.modules["WT_05_API_LAT"] = WatchtowerConfig("WT_05_API_LAT", "External API Latency Observer")
+        self.modules["WT_06_DB_TXN"]  = WatchtowerConfig("WT_06_DB_TXN",  "Database Transaction Consistency Manager")
+        self.modules["WT_07_CNF_MGT"] = WatchtowerConfig("WT_07_CNF_MGT", "Endpoint Configuration Drift Detector")
+        self.modules["WT_08_REG_CMP"] = WatchtowerConfig("WT_08_REG_CMP", "Regulatory Compliance Reporting Agent")
 
-    def _normalize_severity(self, severity: str | Severity) -> Severity:
-        if isinstance(severity, Severity):
-            return severity
-
-        normalized = severity.strip().upper()
-        mapping = {
-            "LOW": Severity.LOW,
-            "MEDIUM": Severity.MEDIUM,
-            "HIGH": Severity.HIGH,
-            "CRITICAL": Severity.CRITICAL,
-        }
-        if normalized not in mapping:
-            raise SecurityNodeError(f"Invalid severity: {severity}")
-        return mapping[normalized]
-
-    def _log_threat_internal(
-        self, source: str, description: str, severity: Severity
-    ) -> ThreatEntry:
-        score = self.SEVERITY_SCORES[severity]
-        entry = ThreatEntry(
-            timestamp=self._utc_now(),
-            source=source,
-            description=description,
-            severity=severity,
-            score=score,
-        )
-        self.threat_log.append(entry)
-        self.cumulative_threat_score += score
-
-        logger.warning(
-            f"[THREAT] source={source} | severity={severity.name} | score={score} | {description}"
-        )
-        return entry
-
-    def _auto_adjust_posture(self, severity: Severity) -> None:
-        """
-        Simple posture logic:
-        - HIGH     -> at least ELEVATED
-        - CRITICAL -> LOCKDOWN
-        """
-        if severity == Severity.CRITICAL:
-            if self.security_mode != SecurityMode.LOCKDOWN:
-                self.switch_security_mode(SecurityMode.LOCKDOWN)
-        elif severity == Severity.HIGH:
-            if self.security_mode == SecurityMode.NORMAL:
-                self.switch_security_mode(SecurityMode.ELEVATED)
-
-    # ---------------------------
-    # Public API
-    # ---------------------------
-    def update_component_status(self, component: str, status: str) -> None:
-        """Public wrapper to update system component status."""
-        self._update_system_status(component, status)
-
-    def advance_firewall(self, steps: int = 1) -> None:
-        """
-        Advance firewall posture by N layers.
-        Raises if exceeding max_firewall_layers.
-        """
-        if steps <= 0:
-            raise SecurityNodeError("Firewall advance steps must be positive.")
-
-        new_layer = self.firewall_layer + steps
-        if new_layer > self.max_firewall_layers:
-            raise SecurityNodeError(
-                f"Firewall is at maximum layer ({self.max_firewall_layers})."
-            )
-
-        self.firewall_layer = new_layer
-        difficulty = round(self.firewall_layer * 3.0, 2)
-        self._update_system_status(
-            "Firewall",
-            f"Active (Layer {self.firewall_layer}/{self.max_firewall_layers}, "
-            f"Difficulty: {difficulty})",
-        )
-
-    def switch_security_mode(self, mode: SecurityMode | str) -> None:
-        """Switch overall security mode with validation and logging."""
-
-        if isinstance(mode, str):
-            normalized = mode.strip().capitalize()
-            mapping = {
-                "Normal": SecurityMode.NORMAL,
-                "Elevated": SecurityMode.ELEVATED,
-                "Lockdown": SecurityMode.LOCKDOWN,
-            }
-            if normalized not in mapping:
-                raise SecurityNodeError(f"Invalid security mode: {mode}")
-            mode_enum = mapping[normalized]
+    def configure_module(self, module_id: str, enabled: Optional[bool] = None, sensitivity: Optional[float] = None):
+        """Updates configuration for a specific watchtower."""
+        if module_id in self.modules:
+            mod = self.modules[module_id]
+            if enabled is not None:
+                mod.enabled = enabled
+            if sensitivity is not None:
+                mod.sensitivity = sensitivity
+            logging.info(f"[CONFIG] Updated {module_id}: Enabled={mod.enabled}, Sensitivity={mod.sensitivity}")
         else:
-            mode_enum = mode
+            logging.error(f"[CONFIG] Module {module_id} not found.")
 
-        old_mode = self.security_mode
-        self.security_mode = mode_enum
-        self._log_event(f"Security mode changed from {old_mode.value} to {mode_enum.value}")
+    def perform_scan(self) -> List[str]:
+        """Iterates through all enabled modules and simulates scan logic."""
+        results = []
+        logging.info("[WATCHTOWER] Initiating distributed scan cycle...")
+        
+        for mid, mod in self.modules.items():
+            if not mod.enabled:
+                continue
 
-    def log_threat(self, source: str, description: str, severity: str | Severity) -> None:
-        """
-        Public method to log a threat and auto-adjust posture.
-        """
-        sev_enum = self._normalize_severity(severity)
-        self._log_threat_internal(source, description, sev_enum)
-        self._auto_adjust_posture(sev_enum)
+            # Simulation of scan logic based on sensitivity
+            mod.last_scan = datetime.datetime.utcnow()
+            
+            # 10% chance of a finding per scan, scaled by sensitivity
+            risk_factor = random.random()
+            if risk_factor < (0.1 * mod.sensitivity):
+                results.append(f"[{mid}] ANOMALY detected in {mod.description}")
+            else:
+                # Debug level for "All Clear" to keep main logs clean
+                logging.debug(f"[{mid}] Scan complete. Status: Nominal.")
+        
+        logging.info(f"[WATCHTOWER] Cycle complete. {len(results)} anomalies flagged.")
+        return results
 
-    def get_summary(self) -> Dict[str, Any]:
-        """High-level summary for dashboards / quick status checks."""
-        return {
-            "node_id": self.node_id,
-            "total_events": len(self.event_log),
-            "total_threats": len(self.threat_log),
-            "firewall_layer": self.firewall_layer,
-            "max_firewall_layers": self.max_firewall_layers,
-            "security_mode": self.security_mode.value,
-            "cumulative_threat_score": self.cumulative_threat_score,
-            "system_components": len(self.system_status),
-        }
+# ============================================================
+#              SECURITY NODE (UPDATED)
+# ============================================================
 
-    def get_logs(self) -> Dict[str, Any]:
-        """Return logs as JSON-serializable structures."""
-        return {
-            "event_log": [
-                {
-                    "timestamp": e.timestamp.isoformat(),
-                    "message": e.message,
-                }
-                for e in self.event_log
-            ],
-            "threat_log": [
-                {
-                    "timestamp": t.timestamp.isoformat(),
-                    "source": t.source,
-                    "description": t.description,
-                    "severity": t.severity.name,
-                    "score": t.score,
-                }
-                for t in self.threat_log
-            ],
-            "system_status": self.system_status.copy(),
-        }
+class SecurityNode:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.event_log = []
+        
+        # Initialize Components
+        self.oversight = OversightEngine(output_callback=self._log_event)
+        self.watchtowers = WatchtowerManager()
+        
+        self._log_event(f"[{SYSTEM_ID}] Initialization Complete.")
+        self._log_event(f"[{SYSTEM_ID}] 8 Watchtower Modules Loaded.")
 
+    def _log_event(self, message: str, module: str = "SYSTEM"):
+        with self.lock:
+            self.event_log.append((datetime.datetime.utcnow(), message))
+            logging.info(f"[{module}] {message}")
 
-# ---------------------------
-# Example usage / quick self-test
-# ---------------------------
+    def _execute_quarantine(self, target_ip: str):
+        self._log_event(f"*** TARGET {target_ip} ISOLATED VIA FIREWALL RULESET ***", module="DEFENSE_ACT")
+
+    def run_diagnostics(self):
+        """Runs the watchtower array."""
+        anomalies = self.watchtowers.perform_scan()
+        for anomaly in anomalies:
+            # If a watchtower finds something, we escalate to the Oversight Engine
+            self._log_event(anomaly, module="ALERT")
+            
+            # Example: If Identity Audit finds something, trigger a block
+            if "WT_03_IAM_AUD" in anomaly:
+                self.trigger_response("Unknown.User.Identity", "Unauthorized Access Pattern")
+
+    def trigger_response(self, source: str, description: str):
+        """Triggers the Veto-able response."""
+        action_id = f"BLOCK-{source.replace('.', '-')}-{int(time.time())}"
+        
+        self.oversight.schedule_action(
+            action_id=action_id,
+            description=f"Revoke Access for {source}",
+            delay_seconds=5,
+            payload=lambda: self._execute_quarantine(source)
+        )
+
+# ============================================================
+#                    SCENARIO SIMULATION
+# ============================================================
+
 if __name__ == "__main__":
     node = SecurityNode()
 
-    node.update_component_status("IDS", "Monitoring")
-    node.update_component_status("SIEM", "Online")
+    print("\n--- CONFIGURATION PHASE ---")
+    # Configuring the towers
+    # We turn up sensitivity on Identity Audit (WT_03) and Network (WT_02)
+    node.watchtowers.configure_module("WT_02_NET_ING", sensitivity=1.5)
+    node.watchtowers.configure_module("WT_03_IAM_AUD", sensitivity=2.0)
+    
+    # We disable the "Compliance Reporting" agent because we don't care about paper pushing right now
+    node.watchtowers.configure_module("WT_08_REG_CMP", enabled=False)
 
-    node.log_threat("192.168.0.5", "Port scan detected", "Medium")
-    node.log_threat("203.0.113.15", "DDoS signatures identified", "Critical")
+    print("\n--- OPERATIONAL PHASE ---")
+    # Run a few scan cycles
+    for i in range(3):
+        print(f"\n[Cycle {i+1}] Running Diagnostics...")
+        node.run_diagnostics()
+        time.sleep(1)
 
-    for _ in range(5):
-        node.advance_firewall()
+    print("\n--- PENDING ACTIONS CHECK ---")
+    # If the random chance triggered an anomaly in WT_03, we should see a pending action here.
+    with node.oversight.lock:
+        pending_count = len(node.oversight.pending_actions)
+        print(f"Pending Actions in Queue: {pending_count}")
+        if pending_count > 0:
+            print(">> System is waiting for Operator Veto...")
+            time.sleep(6) # Let it execute
 
-    print("SUMMARY:")
-    print(node.get_summary())
-
-    print("\nLOG EXPORT:")
-    print(node.get_logs())
-
-
-# Aegis42_watchtower.py
-from __future__ import annotations
-import hashlib
-import hmac
-import json
-import logging
-import threading
-import time
-from dataclasses import dataclass, asdict, field
-from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-# optional: lightweight sklearn import for batch anomaly detector upgrade
-try:
-    from sklearn.ensemble import IsolationForest  # type: ignore
-    SKLEARN_AVAILABLE = True
-except Exception:
-    SKLEARN_AVAILABLE = False
-
-logger = logging.getLogger("Aegis42Watchtower")
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | AEGIS-42 | %(levelname)s | %(message)s")
-
-# ---------------------------
-# CPA chaining helper (tamper-evident)
-# ---------------------------
-def hash_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-@dataclass
-class CPAEntry:
-    timestamp: str
-    payload: Dict[str, Any]
-    prev_hash: Optional[str]
-    entry_hash: str
-
-def cpa_chain_entry(payload: Dict[str, Any], prev_hash: Optional[str]) -> CPAEntry:
-    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    ts = datetime.now(timezone.utc).isoformat()
-    raw = f"{ts}|{payload_json}|{prev_hash}".encode("utf-8")
-    entry_hash = hash_bytes(raw)
-    return CPAEntry(timestamp=ts, payload=payload, prev_hash=prev_hash, entry_hash=entry_hash)
-
-# ---------------------------
-# Watchtower: ingest, store CPA chain, basic rules
-# ---------------------------
-class Watchtower:
-    def __init__(self, signing_key: bytes):
-        """
-        signing_key: HMAC key for local attestation of CPA roots.
-        In production this should be HSM-backed; here it's a minimal placeholder.
-        """
-        self.signing_key = signing_key
-        self.chain: List[CPAEntry] = []
-        self.index_by_source: Dict[str, List[str]] = {}
-        self.lock = threading.RLock()
-        self.rules: List[Callable[[CPAEntry], Optional[Dict[str, Any]]]] = []
-        self.alert_handlers: List[Callable[[Dict[str, Any]], None]] = []
-        self.av_hook: Optional[AVHook] = None
-
-    def attest_root(self) -> Dict[str, str]:
-        """Return signed root hash for external anchoring."""
-        with self.lock:
-            root = self.chain[-1].entry_hash if self.chain else ""
-            sig = hmac.new(self.signing_key, root.encode("utf-8"), hashlib.sha256).hexdigest()
-            return {"root": root, "sig": sig, "timestamp": datetime.now(timezone.utc).isoformat()}
-
-    def ingest(self, payload: Dict[str, Any]) -> CPAEntry:
-        """Ingest a structured payload, append to CPA chain, evaluate rules."""
-        with self.lock:
-            prev = self.chain[-1].entry_hash if self.chain else None
-            entry = cpa_chain_entry(payload, prev)
-            self.chain.append(entry)
-            src = payload.get("source")
-            if src:
-                self.index_by_source.setdefault(src, []).append(entry.entry_hash)
-            logger.info(f"Watchtower ingest: src={src} type={payload.get('type')}")
-        # evaluate rules outside lock to avoid deadlocks
-        for rule in self.rules:
-            try:
-                alert = rule(entry)
-                if alert:
-                    self._handle_alert(alert)
-            except Exception as e:
-                logger.exception("Rule evaluation error: %s", e)
-        return entry
-
-    def register_rule(self, rule_fn: Callable[[CPAEntry], Optional[Dict[str, Any]]]) -> None:
-        """Register a rule that returns an alert dict or None."""
-        self.rules.append(rule_fn)
-
-    def register_alert_handler(self, handler_fn: Callable[[Dict[str, Any]], None]) -> None:
-        self.alert_handlers.append(handler_fn)
-
-    def _handle_alert(self, alert: Dict[str, Any]) -> None:
-        logger.warning(f"ALERT: {alert}")
-        for h in self.alert_handlers:
-            try:
-                h(alert)
-            except Exception:
-                logger.exception("Alert handler failed")
-
-    def attach_av_hook(self, av_hook: "AVHook") -> None:
-        self.av_hook = av_hook
-        logger.info("AV hook attached to Watchtower.")
-
-# ---------------------------
-# AV / Threat Intel Hook interface
-# ---------------------------
-class AVHook:
-    """
-    Minimal interface for AV / threat intel providers.
-    Implementers should fetch indicators, signature updates, and provide lookup methods.
-    """
-    def __init__(self):
-        self.indicators = set()  # example: IPs, hashes, domains
-
-    def update_from_provider(self, batch: List[str]) -> None:
-        """Bulk update indicators (hashes, ips, domains)."""
-        self.indicators.update(batch)
-
-    def is_indicator(self, value: str) -> bool:
-        return value in self.indicators
-
-# ---------------------------
-# Simple online learner (z-score) + optional batch IsolationForest
-# ---------------------------
-class OnlineAnomalyDetector:
-    """
-    Lightweight streaming learner:
-      - Keeps running mean/variance per numeric feature and computes z-score.
-      - Optionally accept batch feature vectors and use sklearn IsolationForest when available.
-    """
-
-    def __init__(self, zscore_threshold: float = 4.0):
-        self.count = 0
-        self.mean = 0.0
-        self.M2 = 0.0
-        self.zscore_threshold = zscore_threshold
-        self.buffer: List[List[float]] = []
-        self.if_model = None
-        if SKLEARN_AVAILABLE:
-            self.if_model = IsolationForest(n_estimators=64, contamination=0.01, random_state=42)
-
-    def update_stream(self, value: float) -> Optional[Dict[str, Any]]:
-        # Welford's online mean/variance
-        self.count += 1
-        delta = value - self.mean
-        self.mean += delta / self.count
-        delta2 = value - self.mean
-        self.M2 += delta * delta2
-        if self.count < 2:
-            return None
-        variance = self.M2 / (self.count - 1)
-        std = variance ** 0.5 if variance > 0 else 0.0
-        z = abs((value - self.mean) / std) if std > 0 else 0.0
-        if z > self.zscore_threshold:
-            return {"type": "anomaly", "value": value, "zscore": z, "mean": self.mean, "std": std}
-        return None
-
-    def add_batch_feature_vector(self, vec: List[float]) -> None:
-        self.buffer.append(vec)
-        if len(self.buffer) >= 256 and self.if_model:
-            # train/update model in background thread
-            try:
-                self.if_model.fit(self.buffer)
-                self.buffer.clear()
-                logger.info("IsolationForest trained on batch.")
-            except Exception:
-                logger.exception("Batch training failed.")
-
-    def predict_if_anomalous(self, vec: List[float]) -> bool:
-        if self.if_model:
-            pred = self.if_model.predict([vec])[0]  # returns 1 or -1
-            return pred == -1
-        return False
-
-# ---------------------------
-# Self-Repair Agent (safe, auditable actions)
-# ---------------------------
-@dataclass
-class RepairAction:
-    id: str
-    name: str
-    params: Dict[str, Any]
-    timestamp: str
-    status: str = "PENDING"
-    actor: Optional[str] = None  # system or username who approved/sent action
-
-class SelfRepairAgent:
-    """
-    Register remediation handlers, request/authorize actions, execute with audit.
-    Destructive actions MUST be multi-signer in production.
-    """
-    def __init__(self):
-        self.handlers: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
-        self.action_log: List[RepairAction] = []
-        self.lock = threading.RLock()
-
-    def register_handler(self, action_name: str, fn: Callable[[Dict[str, Any]], Dict[str, Any]]) -> None:
-        self.handlers[action_name] = fn
-        logger.info("Repair handler registered: %s", action_name)
-
-    def request_action(self, action_name: str, params: Dict[str, Any], actor: Optional[str] = "system") -> RepairAction:
-        if action_name not in self.handlers:
-            raise RuntimeError("Unknown repair action")
-        ra = RepairAction(id=hashlib.sha1((action_name + str(time.time())).encode()).hexdigest(),
-                          name=action_name, params=params, timestamp=datetime.now(timezone.utc).isoformat(),
-                          actor=actor)
-        with self.lock:
-            self.action_log.append(ra)
-        # Execute synchronously for now (could be queued)
-        try:
-            ra.status = "EXECUTING"
-            ret = self.handlers[action_name](params)
-            ra.status = "SUCCESS"
-            logger.info("RepairAction success: %s -> %s", ra.name, ret)
-        except Exception as e:
-            ra.status = "FAILED"
-            logger.exception("RepairAction failed: %s", e)
-        return ra
-
-# ---------------------------
-# Example: tie all together
-# ---------------------------
-def example_setup():
-    # signing key should be HSM backed in prod
-    watch = Watchtower(signing_key=b"dev-temp-key-please-use-hsm")
-    av = AVHook()
-    # preload some indicators (in reality, sync from vendor feeds)
-    av.update_from_provider(["203.0.113.15", "baddomain.example", "deadbeefhash"])
-    watch.attach_av_hook(av)
-
-    # anomaly detector
-    learner = OnlineAnomalyDetector(zscore_threshold=3.5)
-
-    # Register a basic rule: flag CPA entries with source in AV indicators or large numeric anomalies
-    def rule_av_and_anomaly(entry: CPAEntry) -> Optional[Dict[str, Any]]:
-        payload = entry.payload
-        src = payload.get("source", "")
-        if watch.av_hook and watch.av_hook.is_indicator(src):
-            return {"type": "threat_intel_match", "reason": "Source in AV feed", "source": src, "entry": entry.entry_hash}
-        # if payload has numeric metric 'value' we stream to learner
-        val = payload.get("metrics", {}).get("value")
-        if isinstance(val, (int, float)):
-            a = learner.update_stream(float(val))
-            if a:
-                return {"type": "stat_anomaly", "details": a, "entry": entry.entry_hash}
-        return None
-
-    watch.register_rule(rule_av_and_anomaly)
-
-    # register a simple repair agent (quarantine IP & block egress)
-    repair = SelfRepairAgent()
-    def quarantine_ip_handler(params: Dict[str, Any]) -> Dict[str, Any]:
-        ip = params.get("ip")
-        if not ip:
-            raise RuntimeError("missing ip")
-        # placeholder: call firewall API or orchestration system -> here we just log
-        logger.info("Quarantine request applied to IP: %s (simulated)", ip)
-        return {"quarantined": ip}
-    repair.register_handler("quarantine_ip", quarantine_ip_handler)
-
-    # attach alert handler to auto-request remediation for threat_intel_match
-    def alert_to_repair(alert: Dict[str, Any]) -> None:
-        if alert.get("type") == "threat_intel_match":
-            src = alert.get("source")
-            # safe default: request quarantine, actor is 'auto-system'
-            repair.request_action("quarantine_ip", {"ip": src}, actor="auto-system")
-
-    watch.register_alert_handler(alert_to_repair)
-
-    # ingest several events
-    watch.ingest({"type": "network", "source": "192.0.2.1", "metrics": {"value": 1}})
-    watch.ingest({"type": "network", "source": "203.0.113.15", "metrics": {"value": 9.0}})
-    watch.ingest({"type": "syslog", "source": "192.168.0.5", "metrics": {"value": 6.3}})
-
-    print("Attestation:", watch.attest_root())
-    print("Chain length:", len(watch.chain))
-    return watch, learner, repair
-
-if __name__ == "__main__":
-    example_setup()
+    print("\n--- END LOG ---")
