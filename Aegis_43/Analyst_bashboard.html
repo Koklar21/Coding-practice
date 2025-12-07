@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AEGIS-42 | ANALYST WORKSTATION</title>
+    <style>
+        :root {
+            --bg-color: #f3f4f6;
+            --panel-bg: #ffffff;
+            --text-primary: #111827;
+            --text-secondary: #6b7280;
+            --accent-blue: #2563eb;
+            --accent-yellow: #d97706;
+            --accent-red: #dc2626;
+            --border-color: #e5e7eb;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: -apple-system, system-ui, sans-serif;
+            margin: 0;
+            padding: 20px;
+            height: 100vh;
+            box-sizing: border-box;
+            display: grid;
+            grid-template-rows: 60px 1fr;
+            gap: 20px;
+        }
+
+        header {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+
+        .brand {
+            font-weight: 700;
+            font-size: 20px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .mode-badge {
+            background: #fef3c7;
+            color: var(--accent-yellow);
+            padding: 5px 12px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+            border: 1px solid #fcd34d;
+            letter-spacing: 0.5px;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            overflow: hidden;
+        }
+
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border-color);
+            font-weight: 600;
+            color: var(--text-secondary);
+            font-size: 14px;
+            text-transform: uppercase;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .feed {
+            padding: 0;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .incident-row {
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.2s;
+        }
+
+        .incident-row:hover {
+            background: #f9fafb;
+        }
+
+        .incident-details h4 {
+            margin: 0 0 4px 0;
+            font-size: 15px;
+        }
+
+        .incident-details p {
+            margin: 0;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .tag {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .tag.shadow {
+            background: #f3f4f6;
+            color: #4b5563;
+            border: 1px solid #d1d5db;
+        }
+
+        .tag.active {
+            background: #fee2e2;
+            color: #b91c1c;
+            border: 1px solid #fca5a5;
+        }
+
+        .action-area {
+            text-align: right;
+        }
+
+        .timer {
+            font-family: 'Courier New', monospace;
+            font-weight: 700;
+            color: var(--accent-yellow);
+            font-size: 18px;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .btn {
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .btn-veto {
+            background: white;
+            border: 1px solid var(--accent-red);
+            color: var(--accent-red);
+        }
+
+        .btn-veto:hover {
+            background: var(--accent-red);
+            color: white;
+        }
+
+        .log-console {
+            background: #111827;
+            color: #d1d5db;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            padding: 15px;
+            overflow-y: auto;
+        }
+
+        .log-line {
+            margin-bottom: 4px;
+        }
+
+        .log-line.sim {
+            color: var(--accent-yellow);
+        }
+
+        .log-line.crit {
+            color: #fca5a5;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="brand">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+            </svg>
+            AEGIS-42
+        </div>
+        <div class="mode-badge" id="system-mode">MODE: SHADOW ADVISORY (SIMULATION)</div>
+    </header>
+
+    <div class="dashboard">
+        <div class="panel">
+            <div class="panel-header">
+                <span>Incident Recommendations</span>
+                <span>Live Feed</span>
+            </div>
+            <div class="feed" id="incident-feed"></div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">System Telemetry</div>
+            <div class="log-console" id="log-console">
+                <div class="log-line">[SYS] Oversight Engine Initialized.</div>
+                <div class="log-line">[CFG] Loaded Configuration: SHADOW_MODE=True</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const MODES = {
+            SHADOW: "SHADOW",
+            ACTIVE: "ACTIVE",
+        };
+
+        const feed = document.getElementById("incident-feed");
+        const consoleLog = document.getElementById("log-console");
+        const modeBadge = document.getElementById("system-mode");
+
+        let currentMode = MODES.SHADOW;
+        const incidents = new Map();
+
+        function addLog(msg, type = "") {
+            const div = document.createElement("div");
+            div.className = `log-line ${type}`;
+            div.textContent = `> ${msg}`;
+            consoleLog.appendChild(div);
+            consoleLog.scrollTop = consoleLog.scrollHeight;
+        }
+
+        function formatSeconds(sec) {
+            const s = Math.max(0, sec | 0);
+            const mm = String(Math.floor(s / 60)).padStart(2, "0");
+            const ss = String(s % 60).padStart(2, "0");
+            return `${mm}:${ss}`;
+        }
+
+        function createIncident(ip, threat) {
+            const id = `inc-${Math.random().toString(36).slice(2, 10)}`;
+            const row = document.createElement("div");
+            row.className = "incident-row";
+            row.dataset.incidentId = id;
+
+            if (currentMode === MODES.SHADOW) {
+                row.innerHTML = `
