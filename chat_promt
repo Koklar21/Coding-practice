@@ -1,0 +1,13 @@
+ACT AS: Senior Cyber Security Architect and Financial Compliance Officer.
+​CONTEXT: I am building a "Ghost System" — an internal affairs overlay designed to detect internal fraud and "slow boil" theft (incremental stealing) using a Zero Trust architecture. The code is written in Python.
+​TASK:
+Review the provided Python code (ai_governance_engine_v2.py) for the following specific vulnerabilities:
+​Financial Integrity: verify that decimal.Decimal is used correctly and that no floating-point math errors can occur during transaction processing.
+​Thread Safety: Review the threading.Lock implementation in VelocityGuard and AdaptiveIntelligence. Are there any potential Deadlocks or Race Conditions?
+​Logic Gaps: Look at the detect_slow_boil linear regression logic. Is there a mathematical way a user could bypass this while still increasing their theft amount?
+​Auditability: Does the SecureAuditLog capture enough metadata to stand up in a court of law?
+​OUTPUT:
+​Rate the "Audit Readiness" on a scale of 1-10.
+​List any Critical Vulnerabilities found.
+​Suggest 1 optimization for the linear regression math.
+​[PASTE THE PYTHON CODE HERE]
