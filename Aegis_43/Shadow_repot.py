@@ -1,11 +1,18 @@
 import argparse
 import datetime
+import json
 import sqlite3
 from collections import Counter, defaultdict
-from typing import Dict, List, Tuple, Optional
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Any
 
-
-DEFAULT_DB = "aegis_secure.db"
+# -------------------------
+# Option A: DB next to file
+# -------------------------
+try:
+    DEFAULT_DB = str(Path(__file__).resolve().parent / "aegis_secure.db")
+except NameError:
+    DEFAULT_DB = str(Path.cwd() / "aegis_secure.db")
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,27 +40,42 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def fetch_logs(
-    db_path: str, days: int
-) -> List[Tuple[int, str, str, str]]:
+def fetch_logs(db_path: str, days: int) -> List[Tuple[int, str, str, str, Optional[str]]]:
     """
-    Returns rows: (id, timestamp, module, message)
+    Returns rows: (id, timestamp, module, message, context_json)
     """
     cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days)
     cutoff_str = cutoff.isoformat()
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT id, timestamp, module, message
-        FROM event_logs
-        WHERE timestamp >= ?
-        ORDER BY id ASC
-        """,
-        (cutoff_str,),
-    )
-    rows = cursor.fetchall()
+
+    # If context_json column doesn't exist in older DBs, this will throw.
+    # We'll try modern schema first, then fallback.
+    try:
+        cursor.execute(
+            """
+            SELECT id, timestamp, module, message, context_json
+            FROM event_logs
+            WHERE timestamp >= ?
+            ORDER BY id ASC
+            """,
+            (cutoff_str,),
+        )
+        rows = cursor.fetchall()
+    except sqlite3.Error:
+        cursor.execute(
+            """
+            SELECT id, timestamp, module, message
+            FROM event_logs
+            WHERE timestamp >= ?
+            ORDER BY id ASC
+            """,
+            (cutoff_str,),
+        )
+        legacy = cursor.fetchall()
+        rows = [(i, ts, mod, msg, None) for (i, ts, mod, msg) in legacy]
+
     conn.close()
     return rows
 
@@ -64,37 +86,24 @@ def parse_threat_message(msg: str) -> Optional[Tuple[str, str]]:
     if not msg.startswith(prefix):
         return None
     try:
-        rest = msg[len(prefix) :]
-        # split from the right on " from "
+        rest = msg[len(prefix):]
         threat_type, ip = rest.rsplit(" from ", 1)
         return threat_type.strip(), ip.strip()
     except ValueError:
         return None
 
 
-def extract_ip_from_description(desc: str) -> Optional[str]:
-    # Expected: "Firewall Ban for {ip}"
-    prefix = "Firewall Ban for "
-    if desc.startswith(prefix):
-        return desc[len(prefix) :].strip()
-    return None
-
-
-def extract_ip_from_action_id(action_id: str) -> Optional[str]:
-    # Expected: "BLOCK-203-0-113-88" -> "203.0.113.88"
-    prefix = "BLOCK-"
-    if not action_id.startswith(prefix):
+def safe_load_context(context_json: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not context_json:
         return None
-    body = action_id[len(prefix) :]
-    parts = body.split("-")
-    if len(parts) < 4:
+    try:
+        obj = json.loads(context_json)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
         return None
-    return ".".join(parts)
 
 
-def analyze_logs(
-    rows: List[Tuple[int, str, str, str]]
-) -> Dict[str, any]:
+def analyze_logs(rows: List[Tuple[int, str, str, str, Optional[str]]]) -> Dict[str, Any]:
     threats_by_ip: Dict[str, Counter] = defaultdict(Counter)
     threat_type_counter: Counter = Counter()
     total_threats = 0
@@ -108,25 +117,39 @@ def analyze_logs(
 
     sample_lines: List[Tuple[str, str, str]] = []
 
-    for _id, ts, module, message in rows:
+    for _id, ts, module, message, context_json in rows:
         if first_ts is None:
             first_ts = ts
         last_ts = ts
 
-        # Collect some sample lines for the tail of the report
-        if len(sample_lines) < 100:  # cap to avoid stupid amounts
+        if len(sample_lines) < 100:
             sample_lines.append((ts, module, message))
 
-        # Threat detection
-        parsed = parse_threat_message(message)
-        if parsed:
-            threat_type, ip = parsed
-            total_threats += 1
-            threat_type_counter[threat_type] += 1
-            threats_by_ip[ip][threat_type] += 1
+        ctx = safe_load_context(context_json)
+
+        # -----------------------
+        # Threat detection: prefer structured context
+        # -----------------------
+        if module == "THREAT_INT":
+            ip = None
+            threat_type = None
+            if ctx:
+                ip = ctx.get("ip") or ctx.get("ip_source")
+                threat_type = ctx.get("threat_type")
+            if not (ip and threat_type):
+                parsed = parse_threat_message(message)
+                if parsed:
+                    threat_type, ip = parsed
+
+            if ip and threat_type:
+                total_threats += 1
+                threat_type_counter[threat_type] += 1
+                threats_by_ip[ip][threat_type] += 1
             continue
 
+        # -----------------------
         # Oversight actions
+        # -----------------------
         if module == "OVERSIGHT":
             if "PENDING:" in message:
                 pending_actions += 1
@@ -148,7 +171,7 @@ def analyze_logs(
     }
 
 
-def print_report(analysis: Dict[str, any], days: int, db_path: str, sample_limit: int):
+def print_report(analysis: Dict[str, Any], days: int, db_path: str, sample_limit: int) -> None:
     print()
     print(f"SHADOW-RUN STYLE REPORT (last {days} day(s))")
     print("=" * 60)
@@ -161,13 +184,11 @@ def print_report(analysis: Dict[str, any], days: int, db_path: str, sample_limit
     print()
     print("THREAT SUMMARY")
     print("-" * 60)
-    print(f"Total threats observed      : {analysis['total_threats']}")
-    print(f"Unique source IPs           : {len(analysis['threats_by_ip'])}")
-    print(
-        f"Total recommendations (pending actions logged): {analysis['pending_actions']}"
-    )
-    print(f"Auto-executed equivalents   : {analysis['auto_executed']}")
-    print(f"Operator vetoes recorded    : {analysis['vetoed']}")
+    print(f"Total threats observed                 : {analysis['total_threats']}")
+    print(f"Unique source IPs                      : {len(analysis['threats_by_ip'])}")
+    print(f"Total recommendations (pending logged) : {analysis['pending_actions']}")
+    print(f"Auto-executed equivalents              : {analysis['auto_executed']}")
+    print(f"Operator vetoes recorded               : {analysis['vetoed']}")
 
     print()
     print("Threats by type:")
@@ -182,7 +203,6 @@ def print_report(analysis: Dict[str, any], days: int, db_path: str, sample_limit
     if not analysis["threats_by_ip"]:
         print("  (none recorded)")
     else:
-        # rank IPs by total events
         ip_rank = []
         for ip, counter in analysis["threats_by_ip"].items():
             total = sum(counter.values())
@@ -190,9 +210,7 @@ def print_report(analysis: Dict[str, any], days: int, db_path: str, sample_limit
         ip_rank.sort(key=lambda x: x[1], reverse=True)
 
         for ip, total, counter in ip_rank[:10]:
-            breakdown = ", ".join(
-                f"{ttype}={count}" for ttype, count in counter.most_common()
-            )
+            breakdown = ", ".join(f"{ttype}={count}" for ttype, count in counter.most_common())
             print(f"  - {ip}: {total} event(s) [{breakdown}]")
 
     print()
@@ -209,7 +227,7 @@ def print_report(analysis: Dict[str, any], days: int, db_path: str, sample_limit
     print()
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     try:
