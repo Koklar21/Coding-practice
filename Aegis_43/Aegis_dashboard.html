@@ -1,321 +1,214 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AEGIS-43 | OVERSIGHT CONSOLE</title>
-    <style>
-        :root {
-            --bg-color: #0a0b10;
-            --panel-bg: #14161f;
-            --text-primary: #e0e6ed;
-            --text-secondary: #94a3b8;
-            --accent-green: #10b981;
-            --accent-red: #ef4444;
-            --accent-orange: #f59e0b;
-            --accent-blue: #3b82f6;
-            --font-mono: 'Courier New', Courier, monospace;
-        }
+<script>
+  const logConsole = document.getElementById("log-console");
+  const threatFeed = document.getElementById("threat-feed");
+  const recordCountEl = document.getElementById("record-count");
 
-        body {
-            background-color: var(--bg-color);
-            color: var(--text-primary);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            display: grid;
-            grid-template-columns: 300px 1fr;
-            grid-gap: 20px;
-            height: 100vh;
-            box-sizing: border-box;
-            overflow: hidden;
-        }
+  // In-memory state
+  const threats = new Map();
 
-        .sidebar {
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
+  // -----------------------------
+  // Backend seam (wire later)
+  // -----------------------------
+  const api = {
+    log: async (level, module, message, context = null) => {
+      // TODO: POST /api/v1/logs
+      // await fetch("/api/v1/logs", {method:"POST", headers:{...}, body: JSON.stringify({level,module,message,context})})
+      return true;
+    },
+    veto: async (actionId, operatorId, reason) => {
+      // TODO: POST /api/v1/oversight/veto
+      return true;
+    },
+    execute: async (actionId) => {
+      // TODO: POST /api/v1/oversight/execute
+      return true;
+    },
+    vaultStats: async () => {
+      // TODO: GET /api/v1/vault/stats
+      return { records: null };
+    },
+  };
 
-        .panel {
-            background-color: var(--panel-bg);
-            border: 1px solid #2d3748;
-            border-radius: 4px;
-            padding: 15px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-        }
+  function nowStamp() {
+    return new Date().toISOString().split("T")[1].split(".")[0];
+  }
 
-        .status-header {
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            color: var(--text-secondary);
-            margin-bottom: 10px;
-            border-bottom: 1px solid #2d3748;
-            padding-bottom: 5px;
-        }
+  function addLog(msg, type = "info") {
+    const div = document.createElement("div");
+    div.className = `log-entry ${type}`;
+    div.textContent = `[${nowStamp()}] ${msg}`;
+    logConsole.appendChild(div);
+    logConsole.scrollTop = logConsole.scrollHeight;
+  }
 
-        .metric-large {
-            font-size: 24px;
-            font-weight: bold;
-            font-family: var(--font-mono);
-        }
+  function fmtMMSS(seconds) {
+    const s = Math.max(0, seconds | 0);
+    const mm = String(Math.floor(s / 60)).padStart(2, "0");
+    const ss = String(s % 60).padStart(2, "0");
+    return `${mm}:${ss}`;
+  }
 
-        .metric-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-        }
+  function uid() {
+    // stable-ish unique ID without collisions
+    return `ACT-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+  }
 
-        .main-feed {
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
+  // -----------------------------
+  // Telemetry spam (demo mode)
+  // -----------------------------
+  setInterval(() => {
+    const msgs = [
+      "[WATCHTOWER] Heartbeat check nominal.",
+      "[DB_TXN] Transaction committed.",
+      "[API_LAT] Latency < 12ms.",
+      "[IAM_AUD] Session validation pass.",
+      "[RES_MON] CPU steady < 42%.",
+      "[INT_VER] File integrity baseline unchanged."
+    ];
+    addLog(msgs[Math.floor(Math.random() * msgs.length)], "info");
+  }, 2000);
 
-        .log-window {
-            flex: 1;
-            background-color: #000;
-            border: 1px solid #2d3748;
-            font-family: var(--font-mono);
-            font-size: 13px;
-            padding: 10px;
-            overflow-y: auto;
-            color: #d1d5db;
-        }
+  // -----------------------------
+  // Core UI: create + manage threats
+  // -----------------------------
+  function createThreat(ip, threatType, delaySeconds = 30) {
+    const id = uid();
+    const createdAt = Date.now();
+    const executeAt = createdAt + delaySeconds * 1000;
 
-        .log-entry {
-            margin-bottom: 4px;
-            border-left: 2px solid transparent;
-            padding-left: 8px;
-        }
-        .log-entry.info { border-left-color: var(--accent-blue); color: #93c5fd; }
-        .log-entry.warn { border-left-color: var(--accent-orange); color: #fdba74; }
-        .log-entry.crit { border-left-color: var(--accent-red); color: #fca5a5; }
+    const card = document.createElement("div");
+    card.className = "threat-card";
+    card.id = id;
 
-        .threat-container {
-            min-height: 200px;
-        }
+    card.innerHTML = `
+      <div class="threat-info">
+        <h3>DETECTED: ${escapeHtml(threatType)}</h3>
+        <p>Source: ${escapeHtml(ip)} | Action: FIREWALL BLOCK</p>
+        <p style="margin-top:6px;">Action ID: <span style="color:#cbd5e1">${id}</span></p>
+      </div>
+      <div style="display:flex; align-items:center;">
+        <div class="countdown-timer" id="timer-${id}">${fmtMMSS(delaySeconds)}</div>
+        <button class="veto-btn" onclick="vetoAction('${id}')">ABORT ACTION</button>
+      </div>
+    `;
+    threatFeed.appendChild(card);
 
-        .threat-card {
-            background: linear-gradient(90deg, rgba(239,68,68,0.1) 0%, rgba(20,22,31,1) 100%);
-            border-left: 4px solid var(--accent-red);
-            padding: 15px;
-            margin-bottom: 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            animation: flash 2s infinite;
-        }
+    const ctx = { action_id: id, ip, threat_type: threatType, delay_seconds: delaySeconds };
+    addLog(`[THREAT_INT] High confidence threat detected: ${threatType} from ${ip}`, "crit");
+    addLog(`[OVERSIGHT] Action staged: ${id}. Executes in ${delaySeconds}s unless vetoed.`, "warn");
+    api.log("INFO", "THREAT_INT", "Threat detected", ctx);
+    api.log("INFO", "OVERSIGHT", "Action staged", ctx);
 
-        .threat-info h3 {
-            margin: 0 0 5px 0;
-            font-size: 16px;
-            color: var(--accent-red);
-        }
+    const state = {
+      id,
+      ip,
+      threatType,
+      createdAt,
+      executeAt,
+      active: true,
+      interval: null,
+      card,
+    };
 
-        .threat-info p {
-            margin: 0;
-            font-size: 12px;
-            color: var(--text-secondary);
-        }
+    state.interval = setInterval(() => tickThreat(id), 250);
+    threats.set(id, state);
+  }
 
-        .countdown-timer {
-            font-family: var(--font-mono);
-            font-size: 28px;
-            font-weight: bold;
-            color: var(--accent-orange);
-            margin-right: 20px;
-        }
+  function tickThreat(actionId) {
+    const t = threats.get(actionId);
+    if (!t || !t.active) return;
 
-        .veto-btn {
-            background-color: transparent;
-            border: 1px solid var(--accent-red);
-            color: var(--accent-red);
-            padding: 10px 20px;
-            font-weight: bold;
-            cursor: pointer;
-            text-transform: uppercase;
-            transition: all 0.2s;
-        }
-        
-        .veto-btn:hover {
-            background-color: var(--accent-red);
-            color: white;
-        }
+    const remainingMs = t.executeAt - Date.now();
+    const remainingSec = Math.ceil(remainingMs / 1000);
 
-        .vetoed-card {
-            border-left-color: var(--text-secondary);
-            background: #1f2937;
-            opacity: 0.7;
-            animation: none;
-        }
+    const timerEl = document.getElementById(`timer-${actionId}`);
+    if (timerEl) timerEl.textContent = fmtMMSS(remainingSec);
 
-        @keyframes flash {
-            0% { box-shadow: 0 0 5px rgba(239,68,68,0.1); }
-            50% { box-shadow: 0 0 15px rgba(239,68,68,0.3); }
-            100% { box-shadow: 0 0 5px rgba(239,68,68,0.1); }
-        }
-    </style>
-</head>
-<body>
+    if (remainingSec <= 0) {
+      executeAction(actionId);
+    }
+  }
 
-    <!-- LEFT SIDEBAR -->
-    <div class="sidebar">
-        <div class="panel">
-            <div class="status-header">System Identity</div>
-            <div class="metric-large" style="color: var(--accent-blue);">AEGIS-43</div>
-            <div style="font-size: 12px; color: var(--text-secondary);">Oversight Node 01</div>
+  async function vetoAction(actionId) {
+    const t = threats.get(actionId);
+    if (!t || !t.active) return;
+
+    const operatorId = prompt("Operator ID:", "operator01");
+    if (operatorId === null) return;
+
+    const reason = prompt("Veto reason (required):", "Authorized traffic / false positive");
+    if (reason === null || reason.trim() === "") {
+      addLog(`[OVERSIGHT] VETO aborted: reason required for ${actionId}.`, "warn");
+      return;
+    }
+
+    // stop countdown
+    t.active = false;
+    clearInterval(t.interval);
+
+    // update card
+    const targetCard = document.getElementById(actionId);
+    if (targetCard) {
+      targetCard.className = "threat-card vetoed-card";
+      targetCard.innerHTML = `
+        <div class="threat-info">
+          <h3 style="color:#9ca3af">ACTION ABORTED</h3>
+          <p>Operator Override Applied.</p>
+          <p style="margin-top:6px;">Operator: <span style="color:#cbd5e1">${escapeHtml(operatorId)}</span></p>
+          <p>Reason: <span style="color:#cbd5e1">${escapeHtml(reason)}</span></p>
+          <p>Action ID: <span style="color:#cbd5e1">${actionId}</span></p>
         </div>
+        <div style="color: var(--text-secondary); font-weight:bold;">VETOED</div>
+      `;
+    }
 
-        <div class="panel">
-            <div class="status-header">Watchtowers (8/8)</div>
-            <div class="metric-row"><span>WT_01_RES_MON</span> <span style="color:var(--accent-green)">●</span></div>
-            <div class="metric-row"><span>WT_02_NET_ING</span> <span style="color:var(--accent-green)">●</span></div>
-            <div class="metric-row"><span>WT_03_IAM_AUD</span> <span style="color:var(--accent-green)">●</span></div>
-            <div class="metric-row"><span>WT_04_INT_VER</span> <span style="color:var(--accent-green)">●</span></div>
-            <div class="metric-row"><span>WT_05_API_LAT</span> <span style="color:var(--accent-green)">●</span></div>
-            <div class="metric-row"><span>WT_06_DB_TXN</span> <span style="color:var(--accent-green)">●</span></div>
-            <div class="metric-row"><span>WT_07_CNF_MGT</span> <span style="color:var(--accent-green)">●</span></div>
-            <div class="metric-row"><span>WT_08_REG_CMP</span> <span style="color:var(--accent-green)">●</span></div>
-        </div>
+    addLog(`[OVERSIGHT] Action ${actionId} VETOED by ${operatorId}. Reason: ${reason}`, "warn");
+    api.log("INFO", "OVERSIGHT", "Action vetoed", { action_id: actionId, operator_id: operatorId, reason });
 
-        <div class="panel">
-            <div class="status-header">Data Vault</div>
-            <div class="metric-row"><span>Status</span> <span style="color:var(--accent-green)">UNSEALED</span></div>
-            <div class="metric-row"><span>Integrity</span> <span style="color:var(--accent-green)">VERIFIED</span></div>
-            <div class="metric-row"><span>Records</span> <span id="record-count">4,291</span></div>
-        </div>
-    </div>
+    await api.veto(actionId, operatorId, reason);
+    threats.delete(actionId);
+  }
 
-    <!-- MAIN CONTENT -->
-    <div class="main-feed">
-        <!-- PENDING ACTIONS (THE VETO UI) -->
-        <div class="panel threat-container">
-            <div class="status-header" style="color: var(--accent-red);">⚠️ Pending Automated Actions (OVERSIGHT REQUIRED)</div>
-            <div id="threat-feed"></div>
-        </div>
+  window.vetoAction = vetoAction;
 
-        <!-- LIVE LOGS -->
-        <div class="panel" style="flex:1; display:flex; flex-direction:column;">
-            <div class="status-header">Live Telemetry Stream</div>
-            <div class="log-window" id="log-console">
-                <div class="log-entry info">[SYSTEM] Initialization complete. Connected to SQLite DB.</div>
-                <div class="log-entry info">[WATCHTOWER] WT_02_NET_ING scanning interface eth0...</div>
-            </div>
-        </div>
-    </div>
+  async function executeAction(actionId) {
+    const t = threats.get(actionId);
+    if (!t || !t.active) return;
 
-    <script>
-        const logConsole = document.getElementById('log-console');
-        const threatFeed = document.getElementById('threat-feed');
-        const threats = new Map();
+    t.active = false;
+    clearInterval(t.interval);
 
-        function addLog(msg, type = 'info') {
-            const div = document.createElement('div');
-            const time = new Date().toISOString().split('T')[1].split('.')[0];
-            div.className = `log-entry ${type}`;
-            div.textContent = `[${time}] ${msg}`;
-            logConsole.appendChild(div);
-            logConsole.scrollTop = logConsole.scrollHeight;
-        }
+    // remove card
+    if (t.card && t.card.parentNode) t.card.parentNode.removeChild(t.card);
 
-        setInterval(() => {
-            const msgs = [
-                "[WATCHTOWER] Heartbeat check nominal.",
-                "[DB_TXN] Transaction 0x492A committed.",
-                "[API_LAT] Latency < 12ms.",
-                "[IAM_AUD] User 'admin' session valid."
-            ];
-            addLog(msgs[Math.floor(Math.random() * msgs.length)], 'info');
-        }, 2000);
+    addLog(`[AUTOMATION] TIMEOUT REACHED. Executing block for ${t.ip} (Action ${actionId})...`, "crit");
+    addLog(`[FIREWALL] Rule AEGIS_BLOCK created for ${t.ip}. Success.`, "info");
 
-        function createThreat(ip, type) {
-            const id = 'ID-' + Math.floor(Math.random() * 10000);
-            let timeLeft = 30;
+    api.log("INFO", "OVERSIGHT", "Action auto-executed", { action_id: actionId, ip: t.ip, threat_type: t.threatType });
+    await api.execute(actionId);
 
-            const card = document.createElement('div');
-            card.className = 'threat-card';
-            card.id = id;
-            card.innerHTML = `
-                <div class="threat-info">
-                    <h3>DETECTED: ${type}</h3>
-                    <p>Source: ${ip} | Action: FIREWALL BLOCK</p>
-                </div>
-                <div style="display:flex; align-items:center;">
-                    <div class="countdown-timer" id="timer-${id}">00:${timeLeft}</div>
-                    <button class="veto-btn" onclick="vetoAction('${id}')">ABORT ACTION</button>
-                </div>
-            `;
-            threatFeed.appendChild(card);
+    threats.delete(actionId);
+  }
 
-            addLog(`[THREAT_INT] High confidence threat detected: ${type} from ${ip}`, 'crit');
-            addLog(`[OVERSIGHT] Scheduling automated block for ${ip} in 30s...`, 'warn');
+  function escapeHtml(str) {
+    return String(str)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
 
-            const interval = setInterval(() => {
-                const threat = threats.get(id);
-                if (!threat || !threat.active) {
-                    clearInterval(interval);
-                    return;
-                }
+  // Optional: update vault record count (when backend exists)
+  async function refreshVaultStats() {
+    const stats = await api.vaultStats();
+    if (stats && typeof stats.records === "number") {
+      recordCountEl.textContent = stats.records.toLocaleString();
+    }
+  }
+  setInterval(refreshVaultStats, 10000);
 
-                timeLeft--;
-                const timerEl = document.getElementById(`timer-${id}`);
-                if (timerEl) {
-                    timerEl.innerText = `00:${timeLeft < 10 ? '0' : ''}${timeLeft}`;
-                }
-
-                if (timeLeft <= 0) {
-                    clearInterval(interval);
-                    threats.delete(id);
-                    executeAction(card, ip);
-                }
-            }, 1000);
-
-            threats.set(id, { ip, type, card, interval, active: true });
-        }
-
-        function vetoAction(targetId) {
-            const threat = threats.get(targetId);
-            if (!threat || !threat.active) return;
-
-            threat.active = false;
-            clearInterval(threat.interval);
-
-            const targetCard = document.getElementById(targetId);
-            if (targetCard) {
-                targetCard.className = 'threat-card vetoed-card';
-                targetCard.innerHTML = `
-                    <div class="threat-info">
-                        <h3 style="color:#9ca3af">ACTION ABORTED</h3>
-                        <p>Operator Override Applied.</p>
-                    </div>
-                    <div style="color: var(--text-secondary); font-weight:bold;">VETOED</div>
-                `;
-            }
-
-            addLog(`[OVERSIGHT] Action ${targetId} VETOED by operator.`, 'warn');
-            threats.delete(targetId);
-        }
-
-        window.vetoAction = vetoAction;
-
-        function executeAction(card, ip) {
-            if (card && card.parentNode) {
-                card.parentNode.removeChild(card);
-            }
-            addLog(`[AUTOMATION] TIMEOUT REACHED. Executing Block on ${ip}...`, 'crit');
-            addLog(`[FIREWALL] Rule AEGIS_BLOCK created for ${ip}. Success.`, 'info');
-        }
-
-        setTimeout(() => {
-            createThreat("203.0.113.45", "SQL INJECTION PATTERN");
-        }, 3000);
-
-        setTimeout(() => {
-            createThreat("198.51.100.12", "DATA EXFILTRATION");
-        }, 15000);
-    </script>
-</body>
-</html>
+  // Demo injections
+  setTimeout(() => createThreat("203.0.113.45", "SQL INJECTION PATTERN", 30), 3000);
+  setTimeout(() => createThreat("198.51.100.12", "DATA EXFILTRATION", 45), 15000);
+</script>
