@@ -1,260 +1,596 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AEGIS-42 | ANALYST WORKSTATION</title>
-    <style>
-        :root {
-            --bg-color: #f3f4f6;
-            --panel-bg: #ffffff;
-            --text-primary: #111827;
-            --text-secondary: #6b7280;
-            --accent-blue: #2563eb;
-            --accent-yellow: #d97706;
-            --accent-red: #dc2626;
-            --border-color: #e5e7eb;
-        }
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AEGIS | ANALYST WORKSTATION</title>
+  <style>
+    :root {
+      --bg-color: #f3f4f6;
+      --panel-bg: #ffffff;
+      --text-primary: #111827;
+      --text-secondary: #6b7280;
+      --accent-blue: #2563eb;
+      --accent-yellow: #d97706;
+      --accent-red: #dc2626;
+      --border-color: #e5e7eb;
+    }
 
-        body {
-            background-color: var(--bg-color);
-            color: var(--text-primary);
-            font-family: -apple-system, system-ui, sans-serif;
-            margin: 0;
-            padding: 20px;
-            height: 100vh;
-            box-sizing: border-box;
-            display: grid;
-            grid-template-rows: 60px 1fr;
-            gap: 20px;
-        }
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-primary);
+      font-family: -apple-system, system-ui, sans-serif;
+      margin: 0;
+      padding: 20px;
+      height: 100vh;
+      box-sizing: border-box;
+      display: grid;
+      grid-template-rows: 60px 1fr;
+      gap: 20px;
+    }
 
-        header {
-            background: var(--panel-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 0 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-        }
+    header {
+      background: var(--panel-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 0 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
 
-        .brand {
-            font-weight: 700;
-            font-size: 20px;
-            color: var(--text-primary);
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+    .brand {
+      font-weight: 700;
+      font-size: 20px;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
 
-        .mode-badge {
-            background: #fef3c7;
-            color: var(--accent-yellow);
-            padding: 5px 12px;
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: 700;
-            border: 1px solid #fcd34d;
-            letter-spacing: 0.5px;
-        }
+    .header-right {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
 
-        .dashboard {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 20px;
-            overflow: hidden;
-        }
+    .mode-badge {
+      background: #fef3c7;
+      color: var(--accent-yellow);
+      padding: 5px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid #fcd34d;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
 
-        .panel {
-            background: var(--panel-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-        }
+    .btn {
+      border: none;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      background: var(--accent-blue);
+      color: white;
+    }
 
-        .panel-header {
-            padding: 15px 20px;
-            border-bottom: 1px solid var(--border-color);
-            font-weight: 600;
-            color: var(--text-secondary);
-            font-size: 14px;
-            text-transform: uppercase;
-            display: flex;
-            justify-content: space-between;
-        }
+    .btn:hover { filter: brightness(0.95); }
 
-        .feed {
-            padding: 0;
-            overflow-y: auto;
-            flex: 1;
-        }
+    .dashboard {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 20px;
+      overflow: hidden;
+    }
 
-        .incident-row {
-            padding: 15px 20px;
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            transition: background 0.2s;
-        }
+    .panel {
+      background: var(--panel-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-height: 0;
+    }
 
-        .incident-row:hover {
-            background: #f9fafb;
-        }
+    .panel-header {
+      padding: 15px 20px;
+      border-bottom: 1px solid var(--border-color);
+      font-weight: 700;
+      color: var(--text-secondary);
+      font-size: 13px;
+      text-transform: uppercase;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
 
-        .incident-details h4 {
-            margin: 0 0 4px 0;
-            font-size: 15px;
-        }
+    .panel-header .right {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
 
-        .incident-details p {
-            margin: 0;
-            font-size: 13px;
-            color: var(--text-secondary);
-        }
+    .feed {
+      padding: 0;
+      overflow-y: auto;
+      flex: 1;
+    }
 
-        .tag {
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-        }
+    .incident-row {
+      padding: 15px 20px;
+      border-bottom: 1px solid var(--border-color);
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      transition: background 0.2s;
+    }
 
-        .tag.shadow {
-            background: #f3f4f6;
-            color: #4b5563;
-            border: 1px solid #d1d5db;
-        }
+    .incident-row:hover { background: #f9fafb; }
 
-        .tag.active {
-            background: #fee2e2;
-            color: #b91c1c;
-            border: 1px solid #fca5a5;
-        }
+    .incident-details h4 {
+      margin: 0 0 6px 0;
+      font-size: 15px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
 
-        .action-area {
-            text-align: right;
-        }
+    .incident-details p {
+      margin: 0;
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.35;
+    }
 
-        .timer {
-            font-family: 'Courier New', monospace;
-            font-weight: 700;
-            color: var(--accent-yellow);
-            font-size: 18px;
-            display: block;
-            margin-bottom: 5px;
-        }
+    .tag {
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      border: 1px solid transparent;
+    }
 
-        .btn {
-            border: none;
-            padding: 6px 12px;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
-        }
+    .tag.shadow {
+      background: #f3f4f6;
+      color: #4b5563;
+      border-color: #d1d5db;
+    }
 
-        .btn-veto {
-            background: white;
-            border: 1px solid var(--accent-red);
-            color: var(--accent-red);
-        }
+    .tag.active {
+      background: #fee2e2;
+      color: #b91c1c;
+      border-color: #fca5a5;
+    }
 
-        .btn-veto:hover {
-            background: var(--accent-red);
-            color: white;
-        }
+    .tag.gated {
+      background: #e0f2fe;
+      color: #075985;
+      border-color: #7dd3fc;
+    }
 
-        .log-console {
-            background: #111827;
-            color: #d1d5db;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            padding: 15px;
-            overflow-y: auto;
-        }
+    .action-area {
+      text-align: right;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-end;
+      min-width: 140px;
+    }
 
-        .log-line {
-            margin-bottom: 4px;
-        }
+    .timer {
+      font-family: "Courier New", monospace;
+      font-weight: 800;
+      color: var(--accent-yellow);
+      font-size: 18px;
+      line-height: 1;
+    }
 
-        .log-line.sim {
-            color: var(--accent-yellow);
-        }
+    .btn-veto {
+      background: white;
+      border: 1px solid var(--accent-red);
+      color: var(--accent-red);
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
 
-        .log-line.crit {
-            color: #fca5a5;
-        }
-    </style>
+    .btn-veto:hover {
+      background: var(--accent-red);
+      color: white;
+    }
+
+    .btn-approve {
+      background: white;
+      border: 1px solid #075985;
+      color: #075985;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .btn-approve:hover {
+      background: #075985;
+      color: white;
+    }
+
+    .log-console {
+      background: #111827;
+      color: #d1d5db;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      padding: 15px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    .log-line { margin-bottom: 6px; }
+    .log-line.sim { color: var(--accent-yellow); }
+    .log-line.crit { color: #fca5a5; }
+    .log-line.ok { color: #86efac; }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .mini {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-secondary);
+    }
+
+    .pill {
+      background: #eef2ff;
+      border: 1px solid #c7d2fe;
+      color: #3730a3;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+  </style>
 </head>
+
 <body>
-
-    <header>
-        <div class="brand">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-            </svg>
-            AEGIS-42
-        </div>
-        <div class="mode-badge" id="system-mode">MODE: SHADOW ADVISORY (SIMULATION)</div>
-    </header>
-
-    <div class="dashboard">
-        <div class="panel">
-            <div class="panel-header">
-                <span>Incident Recommendations</span>
-                <span>Live Feed</span>
-            </div>
-            <div class="feed" id="incident-feed"></div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">System Telemetry</div>
-            <div class="log-console" id="log-console">
-                <div class="log-line">[SYS] Oversight Engine Initialized.</div>
-                <div class="log-line">[CFG] Loaded Configuration: SHADOW_MODE=True</div>
-            </div>
-        </div>
+  <header>
+    <div class="brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+      </svg>
+      AEGIS
     </div>
 
-    <script>
-        const MODES = {
-            SHADOW: "SHADOW",
-            ACTIVE: "ACTIVE",
-        };
+    <div class="header-right">
+      <div class="mode-badge" id="system-mode">MODE: SHADOW ADVISORY (SIMULATION)</div>
+      <button class="btn" id="toggle-mode">Toggle Mode</button>
+      <button class="btn" id="inject-test">Inject Test Incident</button>
+    </div>
+  </header>
 
-        const feed = document.getElementById("incident-feed");
-        const consoleLog = document.getElementById("log-console");
-        const modeBadge = document.getElementById("system-mode");
+  <div class="dashboard">
+    <div class="panel">
+      <div class="panel-header">
+        <span>Incident Recommendations</span>
+        <div class="right">
+          <span class="mini">Queue</span>
+          <span class="pill" id="queue-count">0</span>
+        </div>
+      </div>
+      <div class="feed" id="incident-feed"></div>
+    </div>
 
-        let currentMode = MODES.SHADOW;
-        const incidents = new Map();
+    <div class="panel">
+      <div class="panel-header">
+        <span>System Telemetry</span>
+        <div class="controls">
+          <span class="mini">Status</span>
+          <span class="pill" id="status-pill">Online</span>
+        </div>
+      </div>
+      <div class="log-console" id="log-console">
+        <div class="log-line ok">[SYS] Analyst Workstation Loaded.</div>
+        <div class="log-line">[CFG] Mode initialized to SHADOW.</div>
+        <div class="log-line sim">[SIM] No actions will execute in SHADOW mode.</div>
+      </div>
+    </div>
+  </div>
 
-        function addLog(msg, type = "") {
-            const div = document.createElement("div");
-            div.className = `log-line ${type}`;
-            div.textContent = `> ${msg}`;
-            consoleLog.appendChild(div);
-            consoleLog.scrollTop = consoleLog.scrollHeight;
+  <script>
+    // ------------------------------------------------------------
+    // Modes (align with your governance naming if you want)
+    // ------------------------------------------------------------
+    const MODES = {
+      SHADOW: "SHADOW",
+      ACTIVE: "ACTIVE",
+      HUMAN_GATED: "HUMAN_GATED" // optional future: staged approvals
+    };
+
+    const feed = document.getElementById("incident-feed");
+    const consoleLog = document.getElementById("log-console");
+    const modeBadge = document.getElementById("system-mode");
+    const toggleBtn = document.getElementById("toggle-mode");
+    const injectBtn = document.getElementById("inject-test");
+    const queueCount = document.getElementById("queue-count");
+    const statusPill = document.getElementById("status-pill");
+
+    let currentMode = MODES.SHADOW;
+
+    // In-memory incident store
+    // incident = { id, ip, threat, createdAtMs, executeAtMs, status, vetoReason }
+    const incidents = new Map();
+
+    function addLog(msg, type = "") {
+      const div = document.createElement("div");
+      div.className = `log-line ${type}`;
+      div.textContent = msg.startsWith("[") ? msg : `> ${msg}`;
+      consoleLog.appendChild(div);
+      consoleLog.scrollTop = consoleLog.scrollHeight;
+    }
+
+    function formatSeconds(sec) {
+      const s = Math.max(0, sec | 0);
+      const mm = String(Math.floor(s / 60)).padStart(2, "0");
+      const ss = String(s % 60).padStart(2, "0");
+      return `${mm}:${ss}`;
+    }
+
+    function setMode(mode) {
+      currentMode = mode;
+      if (mode === MODES.SHADOW) {
+        modeBadge.textContent = "MODE: SHADOW ADVISORY (SIMULATION)";
+        modeBadge.style.background = "#fef3c7";
+        modeBadge.style.borderColor = "#fcd34d";
+        modeBadge.style.color = "#b45309";
+        addLog("[CFG] Mode switched to SHADOW. Actions will NOT execute.", "sim");
+      } else if (mode === MODES.ACTIVE) {
+        modeBadge.textContent = "MODE: ACTIVE DEFENSE (VETO WINDOW)";
+        modeBadge.style.background = "#fee2e2";
+        modeBadge.style.borderColor = "#fca5a5";
+        modeBadge.style.color = "#b91c1c";
+        addLog("[CFG] Mode switched to ACTIVE. Actions execute after timer unless vetoed.", "crit");
+      }
+      rerenderAll();
+    }
+
+    function updateQueueCount() {
+      let count = 0;
+      for (const inc of incidents.values()) {
+        if (inc.status === "PENDING" || inc.status === "STAGED") count++;
+      }
+      queueCount.textContent = String(count);
+    }
+
+    function newIncidentId() {
+      return `inc-${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    function createIncidentRow(inc) {
+      const row = document.createElement("div");
+      row.className = "incident-row";
+      row.dataset.incidentId = inc.id;
+
+      const tagClass =
+        (inc.status === "SHADOWED") ? "shadow" :
+        (inc.status === "STAGED") ? "gated" :
+        "active";
+
+      const tagLabel =
+        (inc.status === "SHADOWED") ? "SHADOW" :
+        (inc.status === "STAGED") ? "GATED" :
+        "ACTIVE";
+
+      const created = new Date(inc.createdAtMs).toLocaleString();
+
+      const title = `Threat: ${inc.threat}`;
+      const subtitle = `Source: ${inc.ip} | Created: ${created}`;
+
+      // Action controls (depends on state + current mode)
+      const actionArea = document.createElement("div");
+      actionArea.className = "action-area";
+
+      // Timer (only meaningful if pending in ACTIVE)
+      const timerEl = document.createElement("span");
+      timerEl.className = "timer";
+      timerEl.textContent = inc.status === "PENDING" ? "--:--" : "";
+
+      // Buttons
+      const vetoBtn = document.createElement("button");
+      vetoBtn.className = "btn-veto";
+      vetoBtn.textContent = "VETO";
+      vetoBtn.onclick = () => vetoIncident(inc.id);
+
+      const approveBtn = document.createElement("button");
+      approveBtn.className = "btn-approve";
+      approveBtn.textContent = "APPROVE";
+      approveBtn.onclick = () => approveIncident(inc.id);
+
+      // Decide what controls show
+      if (inc.status === "PENDING" && currentMode === MODES.ACTIVE) {
+        actionArea.appendChild(timerEl);
+        actionArea.appendChild(vetoBtn);
+      } else if (inc.status === "STAGED" && currentMode === MODES.HUMAN_GATED) {
+        actionArea.appendChild(approveBtn);
+        actionArea.appendChild(vetoBtn);
+      } else {
+        // Show status note
+        const note = document.createElement("div");
+        note.style.fontSize = "12px";
+        note.style.fontWeight = "800";
+        note.style.color = "#6b7280";
+        note.textContent = inc.status;
+        actionArea.appendChild(note);
+      }
+
+      row.innerHTML = `
+        <div class="incident-details">
+          <h4>${escapeHtml(title)} <span class="tag ${tagClass}">${tagLabel}</span></h4>
+          <p>${escapeHtml(subtitle)}</p>
+          ${inc.vetoReason ? `<p><strong>Veto:</strong> ${escapeHtml(inc.vetoReason)}</p>` : ""}
+        </div>
+      `;
+
+      row.appendChild(actionArea);
+
+      // store timer element reference for updates
+      row._timerEl = timerEl;
+
+      return row;
+    }
+
+    function rerenderAll() {
+      feed.innerHTML = "";
+      for (const inc of Array.from(incidents.values()).sort((a,b) => b.createdAtMs - a.createdAtMs)) {
+        feed.appendChild(createIncidentRow(inc));
+      }
+      updateQueueCount();
+    }
+
+    function escapeHtml(str) {
+      return String(str)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function injectIncident(ip, threat, delaySeconds = 15) {
+      const id = newIncidentId();
+      const now = Date.now();
+
+      const inc = {
+        id,
+        ip,
+        threat,
+        createdAtMs: now,
+        executeAtMs: now + delaySeconds * 1000,
+        status: "PENDING",
+        vetoReason: ""
+      };
+
+      // Mode behavior
+      if (currentMode === MODES.SHADOW) {
+        inc.status = "SHADOWED";
+        addLog(`[THREAT] ${threat} from ${ip}`, "sim");
+        addLog(`[SIM] Would schedule: BLOCK ${ip} (no action taken)`, "sim");
+      } else if (currentMode === MODES.ACTIVE) {
+        addLog(`[THREAT] ${threat} from ${ip}`, "crit");
+        addLog(`[OVERSIGHT] PENDING: Block IP ${ip}. Executes in ${delaySeconds}s unless vetoed.`, "");
+      } else if (currentMode === MODES.HUMAN_GATED) {
+        inc.status = "STAGED";
+        addLog(`[THREAT] ${threat} from ${ip}`, "crit");
+        addLog(`[OVERSIGHT] STAGED: Block IP ${ip}. Awaiting approval.`, "");
+      }
+
+      incidents.set(id, inc);
+      rerenderAll();
+      return id;
+    }
+
+    function vetoIncident(incidentId) {
+      const inc = incidents.get(incidentId);
+      if (!inc) return;
+
+      const reason = prompt("Veto reason:", "Authorized traffic / false positive");
+      if (reason === null) return;
+
+      inc.status = "VETOED";
+      inc.vetoReason = reason;
+
+      addLog(`[OVERSIGHT] VETOED ${inc.ip} | Reason: ${reason}`, "ok");
+      rerenderAll();
+
+      // Hook: call your backend veto endpoint
+      // fetch(`/api/v1/oversight/veto/${incidentId}`, { method: "POST", body: JSON.stringify({ reason }) })
+    }
+
+    function approveIncident(incidentId) {
+      const inc = incidents.get(incidentId);
+      if (!inc) return;
+
+      inc.status = "APPROVED";
+      addLog(`[OVERSIGHT] APPROVED ${inc.ip} | Executing now.`, "crit");
+
+      // Hook: call backend approve endpoint
+      // fetch(`/api/v1/oversight/approve/${incidentId}`, { method: "POST" })
+
+      // Simulate execution
+      setTimeout(() => {
+        inc.status = "EXECUTED";
+        addLog(`[DEFENSE] BLOCK EXECUTED for ${inc.ip}`, "crit");
+        rerenderAll();
+      }, 300);
+
+      rerenderAll();
+    }
+
+    // Tick loop for timers + auto-execute
+    function tick() {
+      const now = Date.now();
+
+      // update timers + auto execute in ACTIVE
+      for (const inc of incidents.values()) {
+        if (inc.status !== "PENDING") continue;
+
+        const remaining = Math.ceil((inc.executeAtMs - now) / 1000);
+
+        // update the rendered row timer if present
+        const row = feed.querySelector(`[data-incident-id="${inc.id}"]`);
+        if (row && row._timerEl) {
+          row._timerEl.textContent = formatSeconds(remaining);
         }
 
-        function formatSeconds(sec) {
-            const s = Math.max(0, sec | 0);
-            const mm = String(Math.floor(s / 60)).padStart(2, "0");
-            const ss = String(s % 60).padStart(2, "0");
-            return `${mm}:${ss}`;
+        if (currentMode === MODES.ACTIVE && remaining <= 0) {
+          inc.status = "EXECUTED";
+          addLog(`[OVERSIGHT] TIMEOUT -> AUTO-EXECUTING Block IP ${inc.ip}`, "crit");
+          addLog(`[DEFENSE] BLOCK EXECUTED for ${inc.ip}`, "crit");
+          rerenderAll();
+        } else if (currentMode === MODES.SHADOW && remaining <= 0) {
+          // In shadow we don't auto-change, but we can clear "pending" if any existed
+          inc.status = "SHADOWED";
+          rerenderAll();
         }
+      }
 
-        function createIncident(ip, threat) {
-            const id = `inc-${Math.random().toString(36).slice(2, 10)}`;
-            const row = document.createElement("div");
-            row.className = "incident-row";
-            row.dataset.incidentId = id;
+      updateQueueCount();
+      requestAnimationFrame(tick);
+    }
 
-            if (currentMode === MODES.SHADOW) {
-                row.innerHTML = `
+    // Controls
+    toggleBtn.addEventListener("click", () => {
+      setMode(currentMode === MODES.SHADOW ? MODES.ACTIVE : MODES.SHADOW);
+    });
+
+    injectBtn.addEventListener("click", () => {
+      const ips = ["203.0.113.88", "198.51.100.22", "192.0.2.44", "10.1.2.3"];
+      const threats = ["SQL Injection", "RDP Brute Force", "Credential Stuffing", "Anomalous API Burst"];
+      const ip = ips[Math.floor(Math.random() * ips.length)];
+      const threat = threats[Math.floor(Math.random() * threats.length)];
+      injectIncident(ip, threat, 15);
+    });
+
+    // Boot
+    setMode(MODES.SHADOW);
+    tick();
+
+    // Optional: preload a couple sample incidents
+    injectIncident("203.0.113.88", "SQL Injection Attempt", 15);
+    injectIncident("198.51.100.22", "RDP Brute Force", 20);
+  </script>
+</body>
+</html>
