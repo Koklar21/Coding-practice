@@ -7,10 +7,6 @@ Purpose:
   - Nexus SecurityNode runtime
   - Remote Access Gateway (FastAPI) app
 - Avoid side effects on import (no demo runs, no network binds, no sleeps)
-
-Usage:
-- From CLI runner: import aegis_43 as aegis; node = aegis.create_nexus()
-- From ASGI server: import aegis_43 as aegis; app = aegis.create_gateway_app()
 """
 
 from __future__ import annotations
@@ -21,13 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# ----------------------------
-# Version / Identity
-# ----------------------------
 __all__ = [
     "__version__",
     "AegisConfig",
     "resolve_base_dir",
+    "load_config",
     "configure_logging",
     "create_nexus",
     "create_gateway_app",
@@ -38,6 +32,9 @@ __version__ = "0.1.0"
 SYSTEM_ID_DEFAULT = "AEGIS-43-NEXUS-01"
 DB_FILENAME_DEFAULT = "aegis_secure.db"
 LOG_FILENAME_DEFAULT = "aegis_system.log"
+
+_ALLOWED_MODES = {"SHADOW", "HUMAN_GATED", "ACTIVE"}  # keep stringly-typed but validated
+
 
 # ----------------------------
 # Config
@@ -60,7 +57,7 @@ class AegisConfig:
     jwt_audience: str
 
     # Operational defaults
-    default_mode: str  # keep as str to avoid tight coupling across files
+    default_mode: str  # validated string
 
 
 def resolve_base_dir() -> Path:
@@ -76,8 +73,26 @@ def resolve_base_dir() -> Path:
     try:
         return Path(__file__).resolve().parent
     except NameError:
-        # Some restricted environments
         return Path.cwd().resolve()
+
+
+def _resolve_path(env_key: str, default_path: Path) -> Path:
+    raw = os.getenv(env_key)
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return default_path.expanduser().resolve()
+
+
+def _require_secret(name: str, value: str) -> None:
+    """
+    Public-safe behavior:
+    - In production, do not allow the "dev-only-change-me" default.
+    - You can still run locally by setting AEGIS_ENV=dev.
+    """
+    env = os.getenv("AEGIS_ENV", "dev").lower()
+    if env != "dev":
+        if not value or value.strip() == "" or value.strip() == "dev-only-change-me":
+            raise RuntimeError(f"{name} must be set for non-dev environments.")
 
 
 def load_config() -> AegisConfig:
@@ -85,8 +100,8 @@ def load_config() -> AegisConfig:
 
     system_id = os.getenv("AEGIS_SYSTEM_ID", SYSTEM_ID_DEFAULT)
 
-    db_path = Path(os.getenv("AEGIS_DB_PATH", str(base_dir / DB_FILENAME_DEFAULT))).expanduser().resolve()
-    log_path = Path(os.getenv("AEGIS_LOG_PATH", str(base_dir / LOG_FILENAME_DEFAULT))).expanduser().resolve()
+    db_path = _resolve_path("AEGIS_DB_PATH", base_dir / DB_FILENAME_DEFAULT)
+    log_path = _resolve_path("AEGIS_LOG_PATH", base_dir / LOG_FILENAME_DEFAULT)
 
     gateway_host = os.getenv("AEGIS_GATEWAY_HOST", "0.0.0.0")
     gateway_port = int(os.getenv("AEGIS_GATEWAY_PORT", "8080"))
@@ -95,7 +110,11 @@ def load_config() -> AegisConfig:
     jwt_issuer = os.getenv("AEGIS_JWT_ISSUER", "aegis")
     jwt_audience = os.getenv("AEGIS_JWT_AUDIENCE", "aegis-remote")
 
-    default_mode = os.getenv("AEGIS_DEFAULT_MODE", "SHADOW")
+    default_mode = os.getenv("AEGIS_DEFAULT_MODE", "SHADOW").upper()
+    if default_mode not in _ALLOWED_MODES:
+        raise ValueError(f"AEGIS_DEFAULT_MODE invalid: {default_mode}. Allowed: {sorted(_ALLOWED_MODES)}")
+
+    _require_secret("AEGIS_JWT_SECRET", jwt_secret)
 
     return AegisConfig(
         system_id=system_id,
@@ -128,18 +147,13 @@ def configure_logging(config: Optional[AegisConfig] = None) -> None:
 
     cfg = config or load_config()
 
-    # Ensure parent dir exists
+    handlers = [logging.StreamHandler()]
+
+    # Try file logging; if it fails, console-only is fine.
     try:
         cfg.log_path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        # If filesystem is locked down, fall back to console only.
-        pass
-
-    handlers = [logging.StreamHandler()]
-    try:
         handlers.insert(0, logging.FileHandler(cfg.log_path, encoding="utf-8"))
     except Exception:
-        # Console-only fallback
         pass
 
     logging.basicConfig(
@@ -149,6 +163,7 @@ def configure_logging(config: Optional[AegisConfig] = None) -> None:
         handlers=handlers,
     )
 
+    # Keep server logs readable if you use uvicorn
     logging.getLogger("uvicorn").setLevel(logging.INFO)
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
@@ -163,48 +178,64 @@ def configure_logging(config: Optional[AegisConfig] = None) -> None:
 
 def create_nexus(config: Optional[AegisConfig] = None):
     """
-    Returns your Nexus runtime object (SecurityNode / Nexus node).
-    This function intentionally avoids importing heavy modules until needed.
+    Returns your Nexus runtime object.
+    Avoids importing heavy modules until needed.
     """
     cfg = config or load_config()
     configure_logging(cfg)
 
-    # Lazy import so __init__.py doesn't explode if files move during refactors
-    try:
-        # Prefer your current Nexus file name
-        from .Aegis_Nexus_node import SecurityNode  # type: ignore
-    except Exception:
-        # Fallback to other common names you used
-        from .Aegis_43 import SecurityNode  # type: ignore
+    # Lazy import so package init doesn't explode during refactors
+    SecurityNode = None
+    import_errors = []
 
-    # Construct node with DB path etc if your constructor supports it.
-    # If your SecurityNode currently hardcodes DB filename, update it later to accept db_path.
-    node = SecurityNode()  # keep simple; your node already binds PersistenceManager internally
-    logging.info(f"[BOOT] Nexus created. system_id={cfg.system_id} db={cfg.db_path}")
+    for mod_name in (".Aegis_Nexus_node", ".Aegis_43", ".aegis_nexus_node", ".aegis_43"):
+        try:
+            module = __import__(__name__ + mod_name, fromlist=["SecurityNode"])
+            SecurityNode = getattr(module, "SecurityNode")
+            break
+        except Exception as exc:
+            import_errors.append(f"{mod_name}: {exc}")
+
+    if SecurityNode is None:
+        raise ImportError("Could not import SecurityNode. Tried:\n- " + "\n- ".join(import_errors))
+
+    # Prefer passing paths explicitly if your constructor supports it.
+    try:
+        node = SecurityNode(db_path=cfg.db_path, system_id=cfg.system_id, default_mode=cfg.default_mode)
+    except TypeError:
+        # Backward-compatible: your current node may not accept these args yet.
+        node = SecurityNode()
+
+    logging.info(f"[BOOT] Nexus created. system_id={cfg.system_id} db={cfg.db_path} mode={cfg.default_mode}")
     return node
 
 
 def create_gateway_app(config: Optional[AegisConfig] = None):
     """
     Returns the FastAPI app for remote access.
-    Expects aegis_remote_gateway.py to define `app` OR a `create_app(config)` function.
+    Supports either:
+    - module-level `app`
+    - factory `create_app(config)`
     """
     cfg = config or load_config()
     configure_logging(cfg)
 
-    # Provide config to gateway through env for now (simple + works everywhere)
+    # Minimal env bridging for downstream modules that still read env vars.
+    # Prefer passing cfg into create_app when available.
     os.environ.setdefault("AEGIS_DB_PATH", str(cfg.db_path))
     os.environ.setdefault("AEGIS_SYSTEM_ID", cfg.system_id)
-    os.environ.setdefault("AEGIS_JWT_SECRET", cfg.jwt_secret)
     os.environ.setdefault("AEGIS_JWT_ISSUER", cfg.jwt_issuer)
     os.environ.setdefault("AEGIS_JWT_AUDIENCE", cfg.jwt_audience)
 
+    # Only set JWT secret in env if it isn't already there (avoid stomping on secrets manager)
+    if "AEGIS_JWT_SECRET" not in os.environ:
+        os.environ["AEGIS_JWT_SECRET"] = cfg.jwt_secret
+
     try:
-        from .aegis_remote_gateway import app  # type: ignore
-        logging.info("[BOOT] Remote Gateway app loaded (module-level app).")
-        return app
-    except Exception:
-        # If you later refactor gateway to expose a factory:
         from .aegis_remote_gateway import create_app  # type: ignore
         logging.info("[BOOT] Remote Gateway app created (factory).")
         return create_app(cfg)
+    except Exception:
+        from .aegis_remote_gateway import app  # type: ignore
+        logging.info("[BOOT] Remote Gateway app loaded (module-level app).")
+        return app
