@@ -1,14 +1,17 @@
 """
-AEGIS-43: Intelligent Log Triage & Response Orchestrator (No Demo)
+AEGIS-43: Intelligent Log Triage & Response Orchestrator (Hardened Foundation)
 
-- 3 deployment modes: SHADOW, HUMAN_GATED, AUTONOMOUS_VETO
-- Structured anomaly records for Watchtower modules
-- Time-delayed veto Oversight Engine (daemon timers so process exits cleanly)
-- SQLite-backed tamper-evident audit log (hash-chained)
-- HUMAN_GATED staged actions persisted in SQLite
-- No demo harness, no auto-running logic
+Fixes added:
+- Ingress validation + size limits (defensive JSON + metadata bounds)
+- Event idempotency / replay defense (persistent seen_events table)
+- Bounded queue + back-pressure (no inline execution during ingest/scan)
+- Two-signal confirmation for high-impact actions (configurable)
+- Action budgets per principal (rate limit response spam / baiting)
+- Time sanity checks (clock skew guardrails)
+- Canonical JSON hashing for audit chain stability
+- Cleaner oversight scheduling and safer execution boundaries
 
-This is a foundation for a SOC-facing service. Add FastAPI/UI on top.
+No demo harness. No auto-run loops. SOC-facing foundation.
 """
 
 from __future__ import annotations
@@ -23,7 +26,9 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from queue import Full, Queue
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 
 # ---------------------------------------------------------------------------
 # Logging Setup
@@ -41,7 +46,6 @@ SYSTEM_ID = "AEGIS-43-NODE-01"
 # ---------------------------------------------------------------------------
 # Enums & Data Models
 # ---------------------------------------------------------------------------
-
 
 class DeploymentMode(Enum):
     SHADOW = auto()           # Log-only, no actions executed
@@ -63,6 +67,10 @@ class EventType(Enum):
     ACTION_VETO = "ACTION_VETO"
     CONFIG = "CONFIG"
     ERROR = "ERROR"
+    DROP = "DROP"             # Back-pressure / invalid events dropped
+    REPLAY = "REPLAY"         # Duplicate event detected
+    BUDGET = "BUDGET"         # Rate-limit / action budget exceeded
+    CORROBORATE = "CORROBORATE"  # Two-signal confirmation events
 
 
 @dataclass(frozen=True)
@@ -72,6 +80,8 @@ class AnomalyRecord:
     severity: RiskLevel
     detected_at: datetime.datetime
     metadata: Dict[str, Any]
+    # NEW: stable event id so we can dedupe/replay-defend
+    event_id: str
 
 
 @dataclass(frozen=True)
@@ -82,23 +92,77 @@ class PendingAction:
     delay_seconds: int
     risk_level: RiskLevel
     payload: Callable[[], None]
+    # NEW: policy metadata
+    principal_id: str
 
 
 # ---------------------------------------------------------------------------
-# SQLite-backed Audit Logger (hash-chained)
+# Safety/Validation Helpers
 # ---------------------------------------------------------------------------
 
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.utcnow().replace(tzinfo=None)
+
+
+def _iso_utc(dt: datetime.datetime, *, seconds: bool = False) -> str:
+    if seconds:
+        return dt.isoformat(timespec="seconds") + "Z"
+    return dt.isoformat(timespec="microseconds") + "Z"
+
+
+def _canonical_json(obj: Any, *, max_len: int) -> str:
+    """
+    Canonical JSON with stable key order and compact separators.
+    Enforces max_len to avoid giant payloads.
+    """
+    s = json.dumps(obj, separators=(",", ":"), sort_keys=True, default=str)
+    if len(s) > max_len:
+        raise ValueError(f"context_json too large ({len(s)} > {max_len})")
+    return s
+
+
+def _safe_str(s: Any, *, max_len: int) -> str:
+    out = str(s)
+    if len(out) > max_len:
+        return out[:max_len] + "…"
+    return out
+
+
+def _hash_str(blob: str) -> str:
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _default_event_id(module_id: str, detected_at: datetime.datetime, description: str, metadata: Dict[str, Any]) -> str:
+    # Deterministic ID for synthetic anomalies; external anomalies should supply their own.
+    base = {
+        "module_id": module_id,
+        "detected_at": _iso_utc(detected_at, seconds=True),
+        "description": description,
+        "meta_hash": _hash_str(_canonical_json(metadata, max_len=20_000)),
+    }
+    return _hash_str(_canonical_json(base, max_len=20_000))
+
+
+# ---------------------------------------------------------------------------
+# SQLite-backed Audit Logger + Replay/Rate Tables
+# ---------------------------------------------------------------------------
 
 class AuditLogger:
     """
-    Append-only audit logger with tamper-evident hashing.
+    Append-only audit logger with tamper-evident hashing + supporting tables.
 
-    Notes:
-    - SQLite does NOT create directories, so we do.
-    - WAL can be flaky in some sandbox/mobile environments. Default is DELETE.
+    Adds:
+    - seen_events: persistent replay defense across restarts
+    - action_budget: per-principal action throttle
+    - corroboration: simple two-signal confirmation cache (persistent)
     """
 
-    def __init__(self, db_path: Path, *, journal_mode: str = "DELETE"):
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        journal_mode: str = "DELETE",
+    ):
         self.db_path = Path(db_path)
         self.journal_mode = journal_mode
         self._lock = threading.RLock()
@@ -109,7 +173,7 @@ class AuditLogger:
 
     def _get_conn(self) -> sqlite3.Connection:
         self._ensure_parent_dir()
-        conn = sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         conn.execute(f"PRAGMA journal_mode={self.journal_mode};")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
@@ -133,9 +197,7 @@ class AuditLogger:
                 );
                 """
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(timestamp);"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(timestamp);")
 
             conn.execute(
                 """
@@ -151,6 +213,47 @@ class AuditLogger:
                 );
                 """
             )
+
+            # Persistent replay defense
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seen_events (
+                    event_id TEXT PRIMARY KEY,
+                    first_seen_at TEXT NOT NULL,
+                    module_id TEXT NOT NULL,
+                    severity TEXT NOT NULL
+                );
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_first ON seen_events(first_seen_at);")
+
+            # Persistent action budget (simple token bucket-ish counters)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS action_budget (
+                    principal_id TEXT PRIMARY KEY,
+                    window_start TEXT NOT NULL,
+                    used_count INTEGER NOT NULL
+                );
+                """
+            )
+
+            # Persistent corroboration cache (two-signal)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS corroboration (
+                    key TEXT PRIMARY KEY,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    count INTEGER NOT NULL
+                );
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_corr_last ON corroboration(last_seen_at);")
+
+    def _get_last_hash(self, conn: sqlite3.Connection) -> Optional[str]:
+        row = conn.execute("SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1;").fetchone()
+        return row[0] if row else None
 
     @staticmethod
     def _hash_event(
@@ -175,21 +278,19 @@ class AuditLogger:
         blob = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         return hashlib.sha256(blob).hexdigest()
 
-    def _get_last_hash(self, conn: sqlite3.Connection) -> Optional[str]:
-        row = conn.execute(
-            "SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1;"
-        ).fetchone()
-        return row[0] if row else None
-
     def append(
         self,
         event_type: EventType,
         module: str,
         message: str,
         context: Optional[Dict[str, Any]] = None,
+        *,
+        max_context_json: int = 20_000,
     ) -> None:
-        ts = datetime.datetime.utcnow().isoformat(timespec="microseconds") + "Z"
-        context_json = json.dumps(context, default=str) if context is not None else None
+        ts = _iso_utc(_utcnow())
+        context_json = None
+        if context is not None:
+            context_json = _canonical_json(context, max_len=max_context_json)
 
         with self._lock, self._get_conn() as conn:
             prev_hash = self._get_last_hash(conn)
@@ -211,16 +312,10 @@ class AuditLogger:
                 (ts, SYSTEM_ID, event_type.value, module, message, context_json, prev_hash, event_hash),
             )
 
-    # -------------------- Staged action persistence (HUMAN_GATED) --------------------
+    # -------------------- HUMAN_GATED: staged action persistence --------------------
 
-    def stage_action(
-        self,
-        action_id: str,
-        description: str,
-        severity: RiskLevel,
-        context: Dict[str, Any],
-    ) -> None:
-        created_at = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    def stage_action(self, action_id: str, description: str, severity: RiskLevel, context: Dict[str, Any]) -> None:
+        created_at = _iso_utc(_utcnow(), seconds=True)
         with self._lock, self._get_conn() as conn:
             conn.execute(
                 """
@@ -228,7 +323,7 @@ class AuditLogger:
                 (action_id, created_at, description, severity, context_json, status)
                 VALUES (?, ?, ?, ?, ?, 'STAGED');
                 """,
-                (action_id, created_at, description, severity.value, json.dumps(context, default=str)),
+                (action_id, created_at, description, severity.value, _canonical_json(context, max_len=20_000)),
             )
 
     def get_staged_action(self, action_id: str) -> Optional[Dict[str, Any]]:
@@ -254,7 +349,7 @@ class AuditLogger:
         }
 
     def mark_action_decision(self, action_id: str, *, status: str, operator_id: str) -> None:
-        decided_at = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        decided_at = _iso_utc(_utcnow(), seconds=True)
         with self._lock, self._get_conn() as conn:
             conn.execute(
                 """
@@ -265,11 +360,127 @@ class AuditLogger:
                 (status, operator_id, decided_at, action_id),
             )
 
+    # -------------------- Replay defense --------------------
+
+    def record_event_if_new(self, event_id: str, module_id: str, severity: RiskLevel, *, ttl_seconds: int) -> bool:
+        """
+        Returns True if new, False if duplicate.
+        Also performs TTL cleanup opportunistically.
+        """
+        now = _utcnow()
+        cutoff = now - datetime.timedelta(seconds=ttl_seconds)
+
+        with self._lock, self._get_conn() as conn:
+            # cleanup old seen events (bounded growth)
+            conn.execute(
+                "DELETE FROM seen_events WHERE first_seen_at < ?;",
+                (_iso_utc(cutoff, seconds=True),),
+            )
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO seen_events(event_id, first_seen_at, module_id, severity)
+                    VALUES (?, ?, ?, ?);
+                    """,
+                    (event_id, _iso_utc(now, seconds=True), module_id, severity.value),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    # -------------------- Action budget --------------------
+
+    def consume_action_budget(
+        self,
+        principal_id: str,
+        *,
+        window_seconds: int,
+        max_actions: int,
+    ) -> bool:
+        """
+        Simple fixed-window counter.
+        True if allowed (budget consumed), False if exceeded.
+        """
+        now = _utcnow()
+        window_start = now.replace(microsecond=0)  # coarse; good enough
+
+        with self._lock, self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT window_start, used_count FROM action_budget WHERE principal_id = ?;",
+                (principal_id,),
+            ).fetchone()
+
+            if not row:
+                conn.execute(
+                    "INSERT INTO action_budget(principal_id, window_start, used_count) VALUES (?, ?, ?);",
+                    (principal_id, _iso_utc(window_start, seconds=True), 1),
+                )
+                return True
+
+            prev_start = datetime.datetime.fromisoformat(row[0].replace("Z", ""))
+            used = int(row[1])
+
+            if (now - prev_start).total_seconds() > window_seconds:
+                conn.execute(
+                    "UPDATE action_budget SET window_start = ?, used_count = ? WHERE principal_id = ?;",
+                    (_iso_utc(window_start, seconds=True), 1, principal_id),
+                )
+                return True
+
+            if used >= max_actions:
+                return False
+
+            conn.execute(
+                "UPDATE action_budget SET used_count = used_count + 1 WHERE principal_id = ?;",
+                (principal_id,),
+            )
+            return True
+
+    # -------------------- Corroboration --------------------
+
+    def corroboration_bump(self, key: str, *, ttl_seconds: int) -> int:
+        """
+        Increment corroboration count for a key within TTL.
+        Returns new count.
+        """
+        now = _utcnow()
+        cutoff = now - datetime.timedelta(seconds=ttl_seconds)
+
+        with self._lock, self._get_conn() as conn:
+            conn.execute(
+                "DELETE FROM corroboration WHERE last_seen_at < ?;",
+                (_iso_utc(cutoff, seconds=True),),
+            )
+            row = conn.execute(
+                "SELECT count FROM corroboration WHERE key = ?;",
+                (key,),
+            ).fetchone()
+
+            if not row:
+                conn.execute(
+                    """
+                    INSERT INTO corroboration(key, first_seen_at, last_seen_at, count)
+                    VALUES (?, ?, ?, ?);
+                    """,
+                    (key, _iso_utc(now, seconds=True), _iso_utc(now, seconds=True), 1),
+                )
+                return 1
+
+            conn.execute(
+                """
+                UPDATE corroboration
+                SET last_seen_at = ?, count = count + 1
+                WHERE key = ?;
+                """,
+                (_iso_utc(now, seconds=True), key),
+            )
+            new_count = int(row[0]) + 1
+            return new_count
+
 
 # ---------------------------------------------------------------------------
 # Oversight Engine (Time-Delayed Veto)
 # ---------------------------------------------------------------------------
-
 
 class OversightEngine:
     """Manages time-delayed veto workflow for actions."""
@@ -292,29 +503,42 @@ class OversightEngine:
                 f"Exec in {action.delay_seconds}s unless vetoed."
             )
             logging.info(f"[OVERSIGHT] {msg}")
-            self._audit.append(EventType.ACTION_STAGE, "OVERSIGHT", msg)
+            self._audit.append(EventType.ACTION_STAGE, "OVERSIGHT", msg, {
+                "action_id": action.action_id,
+                "principal_id": action.principal_id,
+                "risk": action.risk_level.value,
+                "delay_seconds": action.delay_seconds,
+            })
 
             timer = threading.Timer(
                 action.delay_seconds,
                 self._execute_if_not_vetoed,
                 args=[action.action_id],
             )
-            timer.daemon = True  # don’t keep the process alive
+            timer.daemon = True
             self._pending_timers[action.action_id] = timer
             self._pending_actions[action.action_id] = action
             timer.start()
 
     def _execute_if_not_vetoed(self, action_id: str) -> None:
         with self._lock:
-            action = self._pending_actions.get(action_id)
-            if not action:
-                return
-            self._pending_timers.pop(action_id, None)
-            self._pending_actions.pop(action_id, None)
+            action = self._pending_actions.pop(action_id, None)
+            timer = self._pending_timers.pop(action_id, None)
+
+        if not action:
+            return
+        if timer:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
 
         msg = f"[TIMEOUT] Auto-approving: {action.description}"
         logging.info(f"[OVERSIGHT] {msg}")
-        self._audit.append(EventType.ACTION_EXECUTE, "OVERSIGHT", msg)
+        self._audit.append(EventType.ACTION_EXECUTE, "OVERSIGHT", msg, {
+            "action_id": action.action_id,
+            "principal_id": action.principal_id,
+        })
 
         try:
             action.payload()
@@ -322,7 +546,7 @@ class OversightEngine:
         except Exception as exc:
             err_msg = f"Execution failed for {action.action_id}: {exc}"
             logging.error(f"[OVERSIGHT] {err_msg}")
-            self._audit.append(EventType.ERROR, "OVERSIGHT", err_msg)
+            self._audit.append(EventType.ERROR, "OVERSIGHT", err_msg, {"action_id": action.action_id})
 
     def veto_action(self, action_id: str, operator_id: str, reason: str) -> bool:
         with self._lock:
@@ -336,7 +560,11 @@ class OversightEngine:
         timer.cancel()
         msg = f"[VETOED] {action.description} | Operator={operator_id} | Reason={reason}"
         logging.warning(f"[OVERSIGHT] {msg}")
-        self._audit.append(EventType.ACTION_VETO, "OVERSIGHT", msg)
+        self._audit.append(EventType.ACTION_VETO, "OVERSIGHT", msg, {
+            "action_id": action.action_id,
+            "operator_id": operator_id,
+            "reason": _safe_str(reason, max_len=300),
+        })
         self._notify_callback(f"Action {action_id} vetoed by {operator_id}.")
         return True
 
@@ -348,7 +576,6 @@ class OversightEngine:
 # ---------------------------------------------------------------------------
 # Watchtower Modules
 # ---------------------------------------------------------------------------
-
 
 class WatchtowerConfig:
     def __init__(self, module_id: str, description: str, enabled: bool = True, sensitivity: float = 1.0):
@@ -377,13 +604,7 @@ class WatchtowerManager:
         self.modules["WT_07_CNF_MGT"] = WatchtowerConfig("WT_07_CNF_MGT", "Endpoint Configuration Drift Detector")
         self.modules["WT_08_REG_CMP"] = WatchtowerConfig("WT_08_REG_CMP", "Regulatory Compliance Reporting Agent")
 
-    def configure_module(
-        self,
-        module_id: str,
-        *,
-        enabled: Optional[bool] = None,
-        sensitivity: Optional[float] = None,
-    ) -> None:
+    def configure_module(self, module_id: str, *, enabled: Optional[bool] = None, sensitivity: Optional[float] = None) -> None:
         mod = self.modules.get(module_id)
         if not mod:
             logging.error(f"[CONFIG] Module {module_id} not found.")
@@ -392,7 +613,7 @@ class WatchtowerManager:
         if enabled is not None:
             mod.enabled = enabled
         if sensitivity is not None:
-            mod.sensitivity = sensitivity
+            mod.sensitivity = float(sensitivity)
 
         msg = f"Updated {module_id}: enabled={mod.enabled}, sensitivity={mod.sensitivity}"
         logging.info(f"[CONFIG] {msg}")
@@ -400,19 +621,17 @@ class WatchtowerManager:
 
     def perform_scan(self) -> List[AnomalyRecord]:
         """
-        Iterates through enabled modules and emits structured anomalies.
-
-        Still synthetic. Replace metadata generation with real telemetry in production.
+        Still synthetic. Replace with real telemetry later.
+        Emits event_id so orchestrator can dedupe.
         """
         import random
 
         anomalies: List[AnomalyRecord] = []
-        now = datetime.datetime.utcnow()
+        now = _utcnow()
 
         for module_id, mod in self.modules.items():
             if not mod.enabled:
                 continue
-
             mod.last_scan = now
 
             risk_factor = random.random()
@@ -424,12 +643,12 @@ class WatchtowerManager:
 
                 meta: Dict[str, Any] = {"risk_factor": risk_factor, "threshold": threshold}
 
-                # IAM module emits a principal_id so response rules can fire.
                 if module_id == "WT_03_IAM_AUD":
                     meta["principal_id"] = random.choice(
                         ["svc.billing", "svc.payments", "devops.oncall", "Unknown.Principal"]
                     )
 
+                event_id = _default_event_id(module_id, now, desc, meta)
                 anomalies.append(
                     AnomalyRecord(
                         module_id=module_id,
@@ -437,6 +656,7 @@ class WatchtowerManager:
                         severity=severity,
                         detected_at=now,
                         metadata=meta,
+                        event_id=event_id,
                     )
                 )
 
@@ -447,7 +667,6 @@ class WatchtowerManager:
 # Security Node (Core Orchestrator)
 # ---------------------------------------------------------------------------
 
-
 class SecurityNode:
     def __init__(
         self,
@@ -455,11 +674,23 @@ class SecurityNode:
         mode: DeploymentMode = DeploymentMode.SHADOW,
         audit_db_path: Optional[Path] = None,
         journal_mode: str = "DELETE",
+        # Hardening knobs
+        max_metadata_json: int = 12_000,
+        replay_ttl_seconds: int = 3600,
+        max_queue_size: int = 500,
+        max_ingest_wait_ms: int = 25,
+        # Rate limits
+        action_budget_window_seconds: int = 300,
+        action_budget_max_actions: int = 5,
+        # Corroboration
+        require_two_signals_for_high: bool = True,
+        corroboration_ttl_seconds: int = 600,
+        # Time sanity
+        max_clock_skew_seconds: int = 300,
     ):
         self._lock = threading.RLock()
         self.mode = mode
 
-        # Safe default path: DB next to this file (or current working dir if __file__ missing)
         if audit_db_path is None:
             try:
                 base = Path(__file__).resolve().parent
@@ -471,25 +702,96 @@ class SecurityNode:
         self.oversight = OversightEngine(self.audit, notify_callback=self._notify_operator)
         self.watchtowers = WatchtowerManager(self.audit)
 
+        # Hardening configuration
+        self.max_metadata_json = int(max_metadata_json)
+        self.replay_ttl_seconds = int(replay_ttl_seconds)
+        self.max_clock_skew_seconds = int(max_clock_skew_seconds)
+
+        self.action_budget_window_seconds = int(action_budget_window_seconds)
+        self.action_budget_max_actions = int(action_budget_max_actions)
+
+        self.require_two_signals_for_high = bool(require_two_signals_for_high)
+        self.corroboration_ttl_seconds = int(corroboration_ttl_seconds)
+
+        # Bounded work queue
+        self._queue: Queue[AnomalyRecord] = Queue(maxsize=int(max_queue_size))
+        self._max_ingest_wait_ms = int(max_ingest_wait_ms)
+
+        # Worker thread (single worker = deterministic ordering)
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker_stop = threading.Event()
+        self._worker.start()
+
         self._log(EventType.SYSTEM, "SYSTEM", f"[{SYSTEM_ID}] Initialization complete.")
         self._log(EventType.SYSTEM, "SYSTEM", f"Watchtower modules loaded: {len(self.watchtowers.modules)}")
         self._log(EventType.SYSTEM, "SYSTEM", f"Deployment mode: {self.mode.name}")
 
     # ---------------------------- Logging ----------------------------
 
-    def _log(
-        self,
-        event_type: EventType,
-        module: str,
-        message: str,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def _log(self, event_type: EventType, module: str, message: str, context: Optional[Dict[str, Any]] = None) -> None:
         with self._lock:
-            self.audit.append(event_type, module, message, context)
+            try:
+                self.audit.append(event_type, module, message, context, max_context_json=20_000)
+            except Exception as exc:
+                # Last-ditch logging to avoid crashes on logging failures
+                logging.error(f"[AUDIT_FAIL] {event_type.value} {module}: {message} | {exc}")
         logging.info(f"[{module}] {message}")
 
     def _notify_operator(self, message: str) -> None:
         self._log(EventType.SYSTEM, "NOTIFY", message)
+
+    # ---------------------------- Worker Loop ----------------------------
+
+    def shutdown(self) -> None:
+        self._worker_stop.set()
+
+    def _worker_loop(self) -> None:
+        while not self._worker_stop.is_set():
+            try:
+                anomaly = self._queue.get(timeout=0.25)
+            except Exception:
+                continue
+            try:
+                self._handle_anomaly(anomaly)
+            except Exception as exc:
+                self._log(EventType.ERROR, "WORKER", f"Unhandled exception handling anomaly: {exc}", {
+                    "event_id": getattr(anomaly, "event_id", "unknown"),
+                    "module_id": getattr(anomaly, "module_id", "unknown"),
+                })
+            finally:
+                try:
+                    self._queue.task_done()
+                except Exception:
+                    pass
+
+    # ---------------------------- Defensive Validations ----------------------------
+
+    def _validate_anomaly(self, anomaly: AnomalyRecord) -> Tuple[bool, str]:
+        # Basic sanity
+        if not anomaly.module_id or len(anomaly.module_id) > 64:
+            return False, "invalid module_id"
+        if not anomaly.event_id or len(anomaly.event_id) > 128:
+            return False, "invalid event_id"
+        if not isinstance(anomaly.detected_at, datetime.datetime):
+            return False, "invalid detected_at"
+
+        # Time sanity (avoid absurd time travel)
+        now = _utcnow()
+        skew = abs((now - anomaly.detected_at).total_seconds())
+        if skew > self.max_clock_skew_seconds:
+            return False, f"clock_skew_too_large({int(skew)}s)"
+
+        # Metadata size bounds (prevents JSON bombs)
+        try:
+            _canonical_json(anomaly.metadata, max_len=self.max_metadata_json)
+        except Exception as exc:
+            return False, f"metadata_invalid_or_too_large({exc})"
+
+        # Description bounds
+        if len(anomaly.description) > 500:
+            return False, "description_too_large"
+
+        return True, "ok"
 
     # ---------------------------- Actions ----------------------------
 
@@ -500,15 +802,48 @@ class SecurityNode:
     # ------------------------- Public API -------------------------
 
     def run_watchtower_cycle(self) -> List[AnomalyRecord]:
-        """Run a scan + handle anomalies according to rules. Returns anomalies for UI/API."""
+        """
+        Run scan, enqueue anomalies, return them for UI/API.
+        Note: handling is asynchronous via worker queue.
+        """
         anomalies = self.watchtowers.perform_scan()
         for anomaly in anomalies:
-            self._handle_anomaly(anomaly)
+            self.ingest_anomaly(anomaly)
         return anomalies
 
     def ingest_anomaly(self, anomaly: AnomalyRecord) -> None:
-        """Feed an externally-generated anomaly into the orchestrator."""
-        self._handle_anomaly(anomaly)
+        """
+        Defensive ingest:
+        - validate
+        - replay defense
+        - enqueue with back-pressure
+        """
+        ok, reason = self._validate_anomaly(anomaly)
+        if not ok:
+            self._log(EventType.DROP, "INGEST", f"Dropped anomaly {anomaly.event_id}: {reason}", {
+                "module_id": anomaly.module_id,
+                "severity": anomaly.severity.value,
+            })
+            return
+
+        is_new = self.audit.record_event_if_new(
+            anomaly.event_id, anomaly.module_id, anomaly.severity, ttl_seconds=self.replay_ttl_seconds
+        )
+        if not is_new:
+            self._log(EventType.REPLAY, "INGEST", f"Duplicate anomaly suppressed: {anomaly.event_id}", {
+                "module_id": anomaly.module_id,
+                "severity": anomaly.severity.value,
+            })
+            return
+
+        try:
+            self._queue.put(anomaly, timeout=self._max_ingest_wait_ms / 1000.0)
+        except Full:
+            self._log(EventType.DROP, "INGEST", f"Queue full, dropping: {anomaly.event_id}", {
+                "queue_max": self._queue.maxsize,
+                "module_id": anomaly.module_id,
+                "severity": anomaly.severity.value,
+            })
 
     def list_pending_veto_actions(self) -> List[PendingAction]:
         return self.oversight.snapshot_pending()
@@ -522,11 +857,58 @@ class SecurityNode:
     def configure_module(self, module_id: str, *, enabled: Optional[bool] = None, sensitivity: Optional[float] = None) -> None:
         self.watchtowers.configure_module(module_id, enabled=enabled, sensitivity=sensitivity)
 
-    def trigger_response(self, principal_id: str, reason: str, severity: RiskLevel) -> str:
-        """Triggers a response according to deployment mode. Returns action_id."""
+    # ------------------------- Response Logic -------------------------
+
+    def trigger_response(self, principal_id: str, reason: str, severity: RiskLevel, *, anomaly_event_id: str) -> str:
+        """
+        Triggers a response according to deployment mode with:
+        - per-principal action budget
+        - two-signal confirmation for HIGH severity (optional)
+        """
+        principal_id = _safe_str(principal_id, max_len=80)
+        reason = _safe_str(reason, max_len=200)
+
+        # Budget check first to prevent action spam
+        allowed = self.audit.consume_action_budget(
+            principal_id,
+            window_seconds=self.action_budget_window_seconds,
+            max_actions=self.action_budget_max_actions,
+        )
+        if not allowed:
+            self._log(EventType.BUDGET, "ADVISORY", f"Action budget exceeded for {principal_id}. Suppressing response.", {
+                "principal_id": principal_id,
+                "severity": severity.value,
+                "reason": reason,
+            })
+            return f"BUDGET-DENY-{principal_id}-{int(time.time())}"
+
+        # Two-signal confirmation for HIGH (prevents one-signal nukes)
+        if severity is RiskLevel.HIGH and self.require_two_signals_for_high:
+            corr_key = f"HIGH:{principal_id}:{reason}"
+            count = self.audit.corroboration_bump(corr_key, ttl_seconds=self.corroboration_ttl_seconds)
+            self._log(EventType.CORROBORATE, "ADVISORY", f"Corroboration bump {corr_key} -> {count}", {
+                "principal_id": principal_id,
+                "count": count,
+                "anomaly_event_id": anomaly_event_id,
+            })
+            if count < 2:
+                # First hit: log-only, no hard action
+                self._log(EventType.ACTION_STAGE, "ADVISORY", f"[CORROBORATION] Waiting for second signal before acting on HIGH.", {
+                    "principal_id": principal_id,
+                    "reason": reason,
+                    "severity": severity.value,
+                    "anomaly_event_id": anomaly_event_id,
+                })
+                return f"CORR-WAIT-{principal_id}-{int(time.time())}"
+
         action_id = f"REVOKE-{principal_id.replace('.', '-')}-{int(time.time())}"
         description = f"Revoke access for {principal_id} ({reason})"
-        context = {"principal_id": principal_id, "reason": reason, "severity": severity.value}
+        context = {
+            "principal_id": principal_id,
+            "reason": reason,
+            "severity": severity.value,
+            "source_anomaly_event_id": anomaly_event_id,
+        }
 
         if self.mode == DeploymentMode.SHADOW:
             self._log(EventType.ACTION_STAGE, "ADVISORY", f"[SHADOW] Would perform {action_id}: {description}", context)
@@ -537,13 +919,14 @@ class SecurityNode:
             self._log(EventType.ACTION_STAGE, "ADVISORY", f"[HUMAN_GATED] Staged {action_id}: {description}", context)
             return action_id
 
-        # AUTONOMOUS_VETO
+        # AUTONOMOUS_VETO: delayed execution with veto window
         pending = PendingAction(
             action_id=action_id,
             description=description,
-            created_at=datetime.datetime.utcnow(),
+            created_at=_utcnow(),
             delay_seconds=self._resolve_delay_for_severity(severity),
             risk_level=severity,
+            principal_id=principal_id,
             payload=lambda: self._execute_quarantine_target(principal_id, context),
         )
         self.oversight.schedule_vetoable_action(pending)
@@ -569,18 +952,15 @@ class SecurityNode:
     # ------------------------- Rules -------------------------
 
     def _handle_anomaly(self, anomaly: AnomalyRecord) -> None:
-        self._log(
-            EventType.ALERT,
-            "ALERT",
-            f"[{anomaly.module_id}] {anomaly.description}",
-            context={"severity": anomaly.severity.value, **anomaly.metadata},
-        )
+        # ALERT record with bounded context (metadata already validated)
+        alert_ctx = {"event_id": anomaly.event_id, "severity": anomaly.severity.value, **anomaly.metadata}
+        self._log(EventType.ALERT, "ALERT", f"[{anomaly.module_id}] {anomaly.description}", context=alert_ctx)
 
-        # Example rule: IAM anomalies escalate to access revocation suggestion
+        # Example rule: IAM anomalies -> response suggestion
         if anomaly.module_id == "WT_03_IAM_AUD":
             principal = str(anomaly.metadata.get("principal_id", "Unknown.Principal"))
             reason = "Suspicious IAM access pattern"
-            self.trigger_response(principal, reason, anomaly.severity)
+            self.trigger_response(principal, reason, anomaly.severity, anomaly_event_id=anomaly.event_id)
 
     @staticmethod
     def _resolve_delay_for_severity(severity: RiskLevel) -> int:
