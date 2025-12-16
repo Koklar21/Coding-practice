@@ -6,9 +6,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 
-# -------------------------
-# Option A: DB next to file
-# -------------------------
+
 try:
     DEFAULT_DB = str(Path(__file__).resolve().parent / "aegis_secure.db")
 except NameError:
@@ -16,81 +14,13 @@ except NameError:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Generate a shadow-mode style report from AEGIS event logs."
-    )
-    parser.add_argument(
-        "--db",
-        dest="db_path",
-        default=DEFAULT_DB,
-        help=f"Path to SQLite DB (default: {DEFAULT_DB})",
-    )
-    parser.add_argument(
-        "--days",
-        type=int,
-        default=7,
-        help="How many days back to include in the report (default: 7).",
-    )
-    parser.add_argument(
-        "--limit-samples",
-        type=int,
-        default=10,
-        help="Max number of sample log lines to print (default: 10).",
-    )
-    return parser.parse_args()
-
-
-def fetch_logs(db_path: str, days: int) -> List[Tuple[int, str, str, str, Optional[str]]]:
-    """
-    Returns rows: (id, timestamp, module, message, context_json)
-    """
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days)
-    cutoff_str = cutoff.isoformat()
-
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    # If context_json column doesn't exist in older DBs, this will throw.
-    # We'll try modern schema first, then fallback.
-    try:
-        cursor.execute(
-            """
-            SELECT id, timestamp, module, message, context_json
-            FROM event_logs
-            WHERE timestamp >= ?
-            ORDER BY id ASC
-            """,
-            (cutoff_str,),
-        )
-        rows = cursor.fetchall()
-    except sqlite3.Error:
-        cursor.execute(
-            """
-            SELECT id, timestamp, module, message
-            FROM event_logs
-            WHERE timestamp >= ?
-            ORDER BY id ASC
-            """,
-            (cutoff_str,),
-        )
-        legacy = cursor.fetchall()
-        rows = [(i, ts, mod, msg, None) for (i, ts, mod, msg) in legacy]
-
-    conn.close()
-    return rows
-
-
-def parse_threat_message(msg: str) -> Optional[Tuple[str, str]]:
-    # Format: "Threat Detected: {threat_type} from {ip}"
-    prefix = "Threat Detected: "
-    if not msg.startswith(prefix):
-        return None
-    try:
-        rest = msg[len(prefix):]
-        threat_type, ip = rest.rsplit(" from ", 1)
-        return threat_type.strip(), ip.strip()
-    except ValueError:
-        return None
+    p = argparse.ArgumentParser(description="Generate a shadow-mode style report from AEGIS event logs.")
+    p.add_argument("--db", dest="db_path", default=DEFAULT_DB, help=f"Path to SQLite DB (default: {DEFAULT_DB})")
+    p.add_argument("--days", type=int, default=7, help="How many days back to include (default: 7).")
+    p.add_argument("--limit-samples", type=int, default=10, help="Max sample log lines (default: 10).")
+    p.add_argument("--json", action="store_true", help="Emit report as JSON instead of text.")
+    p.add_argument("--verify-vault", action="store_true", help="Verify vault hash chain integrity (can be slow on big DBs).")
+    return p.parse_args()
 
 
 def safe_load_context(context_json: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -103,11 +33,128 @@ def safe_load_context(context_json: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
 
 
-def analyze_logs(rows: List[Tuple[int, str, str, str, Optional[str]]]) -> Dict[str, Any]:
+def fetch_logs(db_path: str, cutoff_ts: str) -> List[Tuple[int, str, str, str, Optional[str], Optional[str]]]:
+    """
+    Returns rows:
+      (id, timestamp, module, message, context_json, level?)
+    level may be None if legacy schema.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+
+        # Prefer modern schema with level + context_json
+        try:
+            cur.execute(
+                """
+                SELECT id, timestamp, module, message, context_json, level
+                FROM event_logs
+                WHERE timestamp >= ?
+                ORDER BY id ASC
+                """,
+                (cutoff_ts,),
+            )
+            rows = cur.fetchall()
+            # normalize into the expected tuple order
+            return [(i, ts, mod, msg, ctx, lvl) for (i, ts, mod, msg, ctx, lvl) in rows]
+        except sqlite3.Error:
+            pass
+
+        # Fallback: timestamp/module/message/context_json
+        try:
+            cur.execute(
+                """
+                SELECT id, timestamp, module, message, context_json
+                FROM event_logs
+                WHERE timestamp >= ?
+                ORDER BY id ASC
+                """,
+                (cutoff_ts,),
+            )
+            rows = cur.fetchall()
+            return [(i, ts, mod, msg, ctx, None) for (i, ts, mod, msg, ctx) in rows]
+        except sqlite3.Error:
+            pass
+
+        # Legacy fallback: timestamp/module/message only
+        cur.execute(
+            """
+            SELECT id, timestamp, module, message
+            FROM event_logs
+            WHERE timestamp >= ?
+            ORDER BY id ASC
+            """,
+            (cutoff_ts,),
+        )
+        rows = cur.fetchall()
+        return [(i, ts, mod, msg, None, None) for (i, ts, mod, msg) in rows]
+
+
+def parse_threat_message(msg: str) -> Optional[Tuple[str, str]]:
+    prefix = "Threat Detected: "
+    if not msg.startswith(prefix):
+        return None
+    try:
+        rest = msg[len(prefix):]
+        threat_type, ip = rest.rsplit(" from ", 1)
+        return threat_type.strip(), ip.strip()
+    except ValueError:
+        return None
+
+
+def vault_stats(db_path: str) -> Dict[str, Any]:
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT COUNT(*) FROM data_vault;")
+            total = int(cur.fetchone()[0])
+            cur.execute("SELECT timestamp FROM data_vault ORDER BY timestamp DESC LIMIT 1;")
+            last = cur.fetchone()
+            return {"records": total, "last_timestamp": (last[0] if last else None)}
+        except sqlite3.Error:
+            return {"records": None, "last_timestamp": None}
+
+
+def verify_vault_chain(db_path: str) -> bool:
+    # lightweight chain verification based on your schema
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT record_id, timestamp, label, payload_sha256, prev_hash, record_hash
+            FROM data_vault ORDER BY timestamp ASC;
+            """
+        )
+        rows = cur.fetchall()
+
+    prev = None
+    import hashlib
+
+    for record_id, ts, label, payload_sha, prev_hash, record_hash in rows:
+        if prev_hash != prev:
+            return False
+        blob = json.dumps(
+            {
+                "record_id": record_id,
+                "timestamp": ts,
+                "label": label,
+                "payload_sha256": payload_sha,
+                "prev_hash": prev_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        expected = hashlib.sha256(blob).hexdigest()
+        if expected != record_hash:
+            return False
+        prev = record_hash
+    return True
+
+
+def analyze_logs(rows: List[Tuple[int, str, str, str, Optional[str], Optional[str]]]) -> Dict[str, Any]:
     threats_by_ip: Dict[str, Counter] = defaultdict(Counter)
     threat_type_counter: Counter = Counter()
-    total_threats = 0
 
+    total_threats = 0
     pending_actions = 0
     auto_executed = 0
     vetoed = 0
@@ -117,7 +164,7 @@ def analyze_logs(rows: List[Tuple[int, str, str, str, Optional[str]]]) -> Dict[s
 
     sample_lines: List[Tuple[str, str, str]] = []
 
-    for _id, ts, module, message, context_json in rows:
+    for _id, ts, module, message, context_json, _level in rows:
         if first_ts is None:
             first_ts = ts
         last_ts = ts
@@ -127,15 +174,15 @@ def analyze_logs(rows: List[Tuple[int, str, str, str, Optional[str]]]) -> Dict[s
 
         ctx = safe_load_context(context_json)
 
-        # -----------------------
-        # Threat detection: prefer structured context
-        # -----------------------
+        # Threat detection
         if module == "THREAT_INT":
             ip = None
             threat_type = None
+
             if ctx:
                 ip = ctx.get("ip") or ctx.get("ip_source")
                 threat_type = ctx.get("threat_type")
+
             if not (ip and threat_type):
                 parsed = parse_threat_message(message)
                 if parsed:
@@ -147,15 +194,15 @@ def analyze_logs(rows: List[Tuple[int, str, str, str, Optional[str]]]) -> Dict[s
                 threats_by_ip[ip][threat_type] += 1
             continue
 
-        # -----------------------
         # Oversight actions
-        # -----------------------
         if module == "OVERSIGHT":
-            if "PENDING:" in message:
+            # Prefer structured context if you add it later, but keep string fallback.
+            m = message.upper()
+            if "PENDING:" in message or "ACTION STAGED" in m:
                 pending_actions += 1
-            elif "TIMEOUT -> AUTO-EXECUTING" in message:
+            elif "TIMEOUT -> AUTO-EXECUTING" in message or "AUTO-EXECUT" in m:
                 auto_executed += 1
-            elif "VETOED:" in message:
+            elif "VETOED:" in message or "VETO" in m:
                 vetoed += 1
 
     return {
@@ -171,7 +218,7 @@ def analyze_logs(rows: List[Tuple[int, str, str, str, Optional[str]]]) -> Dict[s
     }
 
 
-def print_report(analysis: Dict[str, Any], days: int, db_path: str, sample_limit: int) -> None:
+def print_report(analysis: Dict[str, Any], days: int, db_path: str, sample_limit: int, vault: Dict[str, Any], vault_ok: Optional[bool]) -> None:
     print()
     print(f"SHADOW-RUN STYLE REPORT (last {days} day(s))")
     print("=" * 60)
@@ -189,6 +236,14 @@ def print_report(analysis: Dict[str, Any], days: int, db_path: str, sample_limit
     print(f"Total recommendations (pending logged) : {analysis['pending_actions']}")
     print(f"Auto-executed equivalents              : {analysis['auto_executed']}")
     print(f"Operator vetoes recorded               : {analysis['vetoed']}")
+
+    print()
+    print("VAULT SUMMARY")
+    print("-" * 60)
+    print(f"Vault records                          : {vault.get('records')}")
+    print(f"Vault last timestamp                    : {vault.get('last_timestamp')}")
+    if vault_ok is not None:
+        print(f"Vault chain integrity                   : {'OK' if vault_ok else 'FAILED'}")
 
     print()
     print("Threats by type:")
@@ -230,14 +285,48 @@ def print_report(analysis: Dict[str, Any], days: int, db_path: str, sample_limit
 def main() -> None:
     args = parse_args()
 
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=args.days)
+    cutoff_str = cutoff.isoformat(timespec="microseconds") + "Z"
+
     try:
-        rows = fetch_logs(args.db_path, args.days)
+        rows = fetch_logs(args.db_path, cutoff_str)
     except sqlite3.Error as exc:
         print(f"[ERROR] Failed to open or query DB '{args.db_path}': {exc}")
         return
 
     analysis = analyze_logs(rows)
-    print_report(analysis, args.days, args.db_path, args.limit_samples)
+    vstats = vault_stats(args.db_path)
+    vault_ok = verify_vault_chain(args.db_path) if args.verify_vault else None
+
+    if args.json:
+        # Convert Counters/defaultdict to plain JSON-friendly structures
+        out = {
+            "db": args.db_path,
+            "days": args.days,
+            "window": {"first": analysis["first_ts"], "last": analysis["last_ts"]},
+            "totals": {
+                "threats": analysis["total_threats"],
+                "unique_ips": len(analysis["threats_by_ip"]),
+                "pending": analysis["pending_actions"],
+                "auto_executed": analysis["auto_executed"],
+                "vetoed": analysis["vetoed"],
+            },
+            "threats_by_type": dict(analysis["threat_type_counter"]),
+            "top_ips": [
+                {"ip": ip, "total": total, "breakdown": dict(counter)}
+                for ip, total, counter in sorted(
+                    ((ip, sum(c.values()), c) for ip, c in analysis["threats_by_ip"].items()),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )[:10]
+            ],
+            "vault": {**vstats, "chain_ok": vault_ok},
+            "samples": analysis["sample_lines"][: args.limit_samples],
+        }
+        print(json.dumps(out, indent=2, default=str))
+        return
+
+    print_report(analysis, args.days, args.db_path, args.limit_samples, vstats, vault_ok)
 
 
 if __name__ == "__main__":
