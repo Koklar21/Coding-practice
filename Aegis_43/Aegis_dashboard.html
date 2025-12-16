@@ -3,32 +3,142 @@
   const threatFeed = document.getElementById("threat-feed");
   const recordCountEl = document.getElementById("record-count");
 
-  // In-memory state
-  const threats = new Map();
+  // ---- Flags ----
+  const DEMO_MODE = (window.AEGIS_DEMO_MODE ?? true) === true;
+
+  // ---- In-memory render state (UI only) ----
+  // serverActionId -> { interval, lastSnapshot }
+  const renderState = new Map();
 
   // -----------------------------
   // Backend seam (wire later)
   // -----------------------------
   const api = {
+    token: () => sessionStorage.getItem("AEGIS_JWT") || null,
+
+    _headers: () => {
+      const h = { "Content-Type": "application/json" };
+      const t = api.token();
+      if (t) h["Authorization"] = `Bearer ${t}`;
+      return h;
+    },
+
+    // Logs are advisory; do not assume success.
     log: async (level, module, message, context = null) => {
-      // TODO: POST /api/v1/logs
-      // await fetch("/api/v1/logs", {method:"POST", headers:{...}, body: JSON.stringify({level,module,message,context})})
-      return true;
+      if (DEMO_MODE) return true;
+      return fetch("/api/v1/logs", {
+        method: "POST",
+        headers: api._headers(),
+        body: JSON.stringify({ level, module, message, context }),
+      }).then(r => r.ok).catch(() => false);
     },
-    veto: async (actionId, operatorId, reason) => {
-      // TODO: POST /api/v1/oversight/veto
-      return true;
+
+    // Source of truth: pending actions
+    listPendingActions: async () => {
+      if (DEMO_MODE) return demo.listPendingActions();
+      const r = await fetch("/api/v1/actions/pending", { headers: api._headers() });
+      if (!r.ok) throw new Error("pending actions fetch failed");
+      return r.json();
     },
-    execute: async (actionId) => {
-      // TODO: POST /api/v1/oversight/execute
-      return true;
+
+    veto: async (actionId, reason) => {
+      if (DEMO_MODE) return demo.veto(actionId, reason);
+      const r = await fetch("/api/v1/oversight/veto", {
+        method: "POST",
+        headers: api._headers(),
+        body: JSON.stringify({ action_id: actionId, reason }),
+      });
+      return r.ok;
     },
+
+    // Optional: in your model, execute is usually backend-only.
+    // Keep only if you support HUMAN_GATED approvals.
+    approve: async (actionId) => {
+      if (DEMO_MODE) return demo.approve(actionId);
+      const r = await fetch("/api/v1/oversight/approve", {
+        method: "POST",
+        headers: api._headers(),
+        body: JSON.stringify({ action_id: actionId }),
+      });
+      return r.ok;
+    },
+
     vaultStats: async () => {
-      // TODO: GET /api/v1/vault/stats
-      return { records: null };
+      if (DEMO_MODE) return { records: null };
+      const r = await fetch("/api/v1/vault/stats", { headers: api._headers() });
+      if (!r.ok) return { records: null };
+      return r.json();
     },
   };
 
+  // -----------------------------
+  // Demo backend (local mock)
+  // -----------------------------
+  const demo = (() => {
+    // server truth in demo mode
+    const pending = new Map(); // action_id -> snapshot
+
+    function makeAction(ip, threatType, delaySeconds) {
+      const createdAt = Date.now();
+      const executeAt = createdAt + delaySeconds * 1000;
+
+      // Backend-generated ID (demo)
+      const action_id = `ACT-${createdAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+
+      pending.set(action_id, {
+        action_id,
+        description: `Firewall block for ${ip}`,
+        ip,
+        threat_type: threatType,
+        created_at_ms: createdAt,
+        execute_at_ms: executeAt,
+        status: "PENDING", // PENDING | VETOED | EXECUTED
+        mode: "AUTONOMOUS_VETO",
+      });
+    }
+
+    function listPendingActions() {
+      // auto-execute when timer passes (backend truth)
+      const now = Date.now();
+      for (const [id, a] of pending.entries()) {
+        if (a.status === "PENDING" && now >= a.execute_at_ms) {
+          a.status = "EXECUTED";
+          pending.set(id, a);
+        }
+        // cleanup executed after a bit
+        if (a.status === "EXECUTED" && now - a.execute_at_ms > 3000) {
+          pending.delete(id);
+        }
+      }
+      return { actions: Array.from(pending.values()) };
+    }
+
+    function veto(actionId, reason) {
+      const a = pending.get(actionId);
+      if (!a || a.status !== "PENDING") return false;
+      a.status = "VETOED";
+      a.veto_reason = reason;
+      pending.set(actionId, a);
+      // cleanup vetoed after a bit
+      setTimeout(() => pending.delete(actionId), 4000);
+      return true;
+    }
+
+    function approve(actionId) {
+      // For HUMAN_GATED; not used in demo
+      return false;
+    }
+
+    // Demo injections
+    setTimeout(() => makeAction("203.0.113.45", "SQL INJECTION PATTERN", 30), 3000);
+    setTimeout(() => makeAction("198.51.100.12", "DATA EXFILTRATION", 45), 15000);
+
+    return { listPendingActions, veto, approve };
+  })();
+
+  // -----------------------------
+  // UI helpers
+  // -----------------------------
   function nowStamp() {
     return new Date().toISOString().split("T")[1].split(".")[0];
   }
@@ -48,148 +158,6 @@
     return `${mm}:${ss}`;
   }
 
-  function uid() {
-    // stable-ish unique ID without collisions
-    return `ACT-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
-  }
-
-  // -----------------------------
-  // Telemetry spam (demo mode)
-  // -----------------------------
-  setInterval(() => {
-    const msgs = [
-      "[WATCHTOWER] Heartbeat check nominal.",
-      "[DB_TXN] Transaction committed.",
-      "[API_LAT] Latency < 12ms.",
-      "[IAM_AUD] Session validation pass.",
-      "[RES_MON] CPU steady < 42%.",
-      "[INT_VER] File integrity baseline unchanged."
-    ];
-    addLog(msgs[Math.floor(Math.random() * msgs.length)], "info");
-  }, 2000);
-
-  // -----------------------------
-  // Core UI: create + manage threats
-  // -----------------------------
-  function createThreat(ip, threatType, delaySeconds = 30) {
-    const id = uid();
-    const createdAt = Date.now();
-    const executeAt = createdAt + delaySeconds * 1000;
-
-    const card = document.createElement("div");
-    card.className = "threat-card";
-    card.id = id;
-
-    card.innerHTML = `
-      <div class="threat-info">
-        <h3>DETECTED: ${escapeHtml(threatType)}</h3>
-        <p>Source: ${escapeHtml(ip)} | Action: FIREWALL BLOCK</p>
-        <p style="margin-top:6px;">Action ID: <span style="color:#cbd5e1">${id}</span></p>
-      </div>
-      <div style="display:flex; align-items:center;">
-        <div class="countdown-timer" id="timer-${id}">${fmtMMSS(delaySeconds)}</div>
-        <button class="veto-btn" onclick="vetoAction('${id}')">ABORT ACTION</button>
-      </div>
-    `;
-    threatFeed.appendChild(card);
-
-    const ctx = { action_id: id, ip, threat_type: threatType, delay_seconds: delaySeconds };
-    addLog(`[THREAT_INT] High confidence threat detected: ${threatType} from ${ip}`, "crit");
-    addLog(`[OVERSIGHT] Action staged: ${id}. Executes in ${delaySeconds}s unless vetoed.`, "warn");
-    api.log("INFO", "THREAT_INT", "Threat detected", ctx);
-    api.log("INFO", "OVERSIGHT", "Action staged", ctx);
-
-    const state = {
-      id,
-      ip,
-      threatType,
-      createdAt,
-      executeAt,
-      active: true,
-      interval: null,
-      card,
-    };
-
-    state.interval = setInterval(() => tickThreat(id), 250);
-    threats.set(id, state);
-  }
-
-  function tickThreat(actionId) {
-    const t = threats.get(actionId);
-    if (!t || !t.active) return;
-
-    const remainingMs = t.executeAt - Date.now();
-    const remainingSec = Math.ceil(remainingMs / 1000);
-
-    const timerEl = document.getElementById(`timer-${actionId}`);
-    if (timerEl) timerEl.textContent = fmtMMSS(remainingSec);
-
-    if (remainingSec <= 0) {
-      executeAction(actionId);
-    }
-  }
-
-  async function vetoAction(actionId) {
-    const t = threats.get(actionId);
-    if (!t || !t.active) return;
-
-    const operatorId = prompt("Operator ID:", "operator01");
-    if (operatorId === null) return;
-
-    const reason = prompt("Veto reason (required):", "Authorized traffic / false positive");
-    if (reason === null || reason.trim() === "") {
-      addLog(`[OVERSIGHT] VETO aborted: reason required for ${actionId}.`, "warn");
-      return;
-    }
-
-    // stop countdown
-    t.active = false;
-    clearInterval(t.interval);
-
-    // update card
-    const targetCard = document.getElementById(actionId);
-    if (targetCard) {
-      targetCard.className = "threat-card vetoed-card";
-      targetCard.innerHTML = `
-        <div class="threat-info">
-          <h3 style="color:#9ca3af">ACTION ABORTED</h3>
-          <p>Operator Override Applied.</p>
-          <p style="margin-top:6px;">Operator: <span style="color:#cbd5e1">${escapeHtml(operatorId)}</span></p>
-          <p>Reason: <span style="color:#cbd5e1">${escapeHtml(reason)}</span></p>
-          <p>Action ID: <span style="color:#cbd5e1">${actionId}</span></p>
-        </div>
-        <div style="color: var(--text-secondary); font-weight:bold;">VETOED</div>
-      `;
-    }
-
-    addLog(`[OVERSIGHT] Action ${actionId} VETOED by ${operatorId}. Reason: ${reason}`, "warn");
-    api.log("INFO", "OVERSIGHT", "Action vetoed", { action_id: actionId, operator_id: operatorId, reason });
-
-    await api.veto(actionId, operatorId, reason);
-    threats.delete(actionId);
-  }
-
-  window.vetoAction = vetoAction;
-
-  async function executeAction(actionId) {
-    const t = threats.get(actionId);
-    if (!t || !t.active) return;
-
-    t.active = false;
-    clearInterval(t.interval);
-
-    // remove card
-    if (t.card && t.card.parentNode) t.card.parentNode.removeChild(t.card);
-
-    addLog(`[AUTOMATION] TIMEOUT REACHED. Executing block for ${t.ip} (Action ${actionId})...`, "crit");
-    addLog(`[FIREWALL] Rule AEGIS_BLOCK created for ${t.ip}. Success.`, "info");
-
-    api.log("INFO", "OVERSIGHT", "Action auto-executed", { action_id: actionId, ip: t.ip, threat_type: t.threatType });
-    await api.execute(actionId);
-
-    threats.delete(actionId);
-  }
-
   function escapeHtml(str) {
     return String(str)
       .replaceAll("&", "&amp;")
@@ -199,16 +167,139 @@
       .replaceAll("'", "&#039;");
   }
 
-  // Optional: update vault record count (when backend exists)
-  async function refreshVaultStats() {
-    const stats = await api.vaultStats();
-    if (stats && typeof stats.records === "number") {
-      recordCountEl.textContent = stats.records.toLocaleString();
+  function renderThreatCard(a) {
+    const id = a.action_id;
+
+    let card = document.getElementById(id);
+    if (!card) {
+      card = document.createElement("div");
+      card.className = "threat-card";
+      card.id = id;
+      threatFeed.appendChild(card);
+    }
+
+    const now = Date.now();
+    const remainingSec = Math.ceil((a.execute_at_ms - now) / 1000);
+
+    if (a.status === "VETOED") {
+      card.className = "threat-card vetoed-card";
+      card.innerHTML = `
+        <div class="threat-info">
+          <h3 style="color:#9ca3af">ACTION ABORTED</h3>
+          <p>Operator Override Applied.</p>
+          <p>Reason: <span style="color:#cbd5e1">${escapeHtml(a.veto_reason || "N/A")}</span></p>
+          <p>Action ID: <span style="color:#cbd5e1">${escapeHtml(id)}</span></p>
+        </div>
+        <div style="color: var(--text-secondary); font-weight:bold;">VETOED</div>
+      `;
+      return;
+    }
+
+    if (a.status === "EXECUTED") {
+      // Remove card once executed; backend is truth.
+      if (card && card.parentNode) card.parentNode.removeChild(card);
+      return;
+    }
+
+    // PENDING
+    card.className = "threat-card";
+    card.innerHTML = `
+      <div class="threat-info">
+        <h3>DETECTED: ${escapeHtml(a.threat_type)}</h3>
+        <p>Source: ${escapeHtml(a.ip)} | Action: FIREWALL BLOCK</p>
+        <p style="margin-top:6px;">Action ID: <span style="color:#cbd5e1">${escapeHtml(id)}</span></p>
+      </div>
+      <div style="display:flex; align-items:center;">
+        <div class="countdown-timer" id="timer-${id}">${fmtMMSS(remainingSec)}</div>
+        <button class="veto-btn" data-action="${escapeHtml(id)}">ABORT ACTION</button>
+      </div>
+    `;
+  }
+
+  async function vetoAction(actionId) {
+    // No prompt() in production. Use a modal later.
+    const reason = (prompt("Veto reason (required):", "Authorized traffic / false positive") || "").trim();
+    if (!reason) {
+      addLog(`[OVERSIGHT] VETO aborted: reason required for ${actionId}.`, "warn");
+      return;
+    }
+
+    const ok = await api.veto(actionId, reason);
+    if (ok) {
+      addLog(`[OVERSIGHT] Action ${actionId} VETOED. Reason: ${reason}`, "warn");
+      api.log("INFO", "OVERSIGHT", "Action vetoed", { action_id: actionId, reason });
+    } else {
+      addLog(`[OVERSIGHT] VETO failed for ${actionId} (not pending).`, "warn");
     }
   }
+
+  // Event delegation for veto buttons (safer than inline onclick)
+  threatFeed.addEventListener("click", (e) => {
+    const btn = e.target.closest(".veto-btn");
+    if (!btn) return;
+    const actionId = btn.getAttribute("data-action");
+    if (actionId) vetoAction(actionId);
+  });
+
+  // -----------------------------
+  // Poll backend truth
+  // -----------------------------
+  async function refreshThreats() {
+    try {
+      const payload = await api.listPendingActions();
+      const actions = (payload && payload.actions) ? payload.actions : [];
+
+      // Render current
+      const seen = new Set();
+      for (const a of actions) {
+        seen.add(a.action_id);
+        renderThreatCard(a);
+      }
+
+      // Remove cards not present anymore
+      for (const el of Array.from(threatFeed.children)) {
+        if (el && el.id && !seen.has(el.id)) {
+          el.parentNode.removeChild(el);
+        }
+      }
+    } catch (err) {
+      addLog(`[UI] Pending actions refresh failed: ${String(err)}`, "warn");
+    }
+  }
+
+  // -----------------------------
+  // Optional: vault stats
+  // -----------------------------
+  async function refreshVaultStats() {
+    try {
+      const stats = await api.vaultStats();
+      if (stats && typeof stats.records === "number") {
+        recordCountEl.textContent = stats.records.toLocaleString();
+      }
+    } catch {}
+  }
+
+  // -----------------------------
+  // Demo telemetry spam (gate it)
+  // -----------------------------
+  if (DEMO_MODE) {
+    setInterval(() => {
+      const msgs = [
+        "[WATCHTOWER] Heartbeat check nominal.",
+        "[DB_TXN] Transaction committed.",
+        "[API_LAT] Latency < 12ms.",
+        "[IAM_AUD] Session validation pass.",
+        "[RES_MON] CPU steady < 42%.",
+        "[INT_VER] File integrity baseline unchanged."
+      ];
+      addLog(msgs[Math.floor(Math.random() * msgs.length)], "info");
+    }, 2000);
+  }
+
+  // Poll loops
+  setInterval(refreshThreats, 750);
   setInterval(refreshVaultStats, 10000);
 
-  // Demo injections
-  setTimeout(() => createThreat("203.0.113.45", "SQL INJECTION PATTERN", 30), 3000);
-  setTimeout(() => createThreat("198.51.100.12", "DATA EXFILTRATION", 45), 15000);
+  // First draw
+  refreshThreats();
 </script>
